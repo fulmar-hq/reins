@@ -1,4 +1,4 @@
-// The one config file: <private dir>/factory.config.json (see factory.config.example.json).
+// The one config file: <private dir>/reins.config.json (see reins.config.example.json).
 // With no file, every installed provider is on, nothing is sent, and no extra meters show.
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -26,7 +26,7 @@ export type Config = {
 };
 
 const home = (path: string) => resolve(path.replace(/^~(?=\/|$)/, homedir()));
-export const configPath = () => home(process.env.SIMPLE_FACTORY_CONFIG ?? join(process.env.FACTORY_PRIVATE_DIR ?? "~/.simple-factory", "factory.config.json"));
+export const configPath = () => home(process.env.REINS_CONFIG ?? join(process.env.REINS_PRIVATE_DIR ?? "~/.reins", "reins.config.json"));
 
 /** Defaults merged with the file. Throws a plain sentence when the file is wrong. */
 export function loadConfig(path = configPath(), raw?: Record<string, any>): Config {
@@ -57,7 +57,7 @@ export function loadConfig(path = configPath(), raw?: Record<string, any>): Conf
   });
   if (r.defaultProvider && !enabled.includes(r.defaultProvider)) throw Error(`defaultProvider "${r.defaultProvider}" is not an enabled provider.`);
   return {
-    privateDir: home(r.privateDir ?? process.env.FACTORY_PRIVATE_DIR ?? dirname(path)), timezone,
+    privateDir: home(r.privateDir ?? process.env.REINS_PRIVATE_DIR ?? dirname(path)), timezone,
     defaultProvider: r.defaultProvider ?? enabled[0] ?? "codex", providers,
     caps: { minutes: 60, tokens: 500_000, silentMinutes: 10, ...r.caps },
     notify: { live: r.notify?.live === true, owner: channel(r.notify?.owner, "owner"), coordinator: channel(r.notify?.coordinator ?? { channel: "file" }, "coordinator"),

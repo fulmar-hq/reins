@@ -1,4 +1,4 @@
-# Setting up the simple factory (instructions for the coordinator chat)
+# Setting up Reins (instructions for the coordinator chat)
 
 You are a coordinator chat (Claude Code or Codex) setting this up with your user, the owner. Do the steps yourself;
 ask only the questions below, in plain words, one at a time. Never sign in to anything for the owner, never ask
@@ -14,14 +14,14 @@ if this is not a Mac.
    through it: in Telegram, message @BotFather, send `/newbot`, follow the prompts, and keep the token it gives;
    then send any message to the new bot, and open `https://api.telegram.org/bot<token>/getUpdates` in a browser to
    find `"chat":{"id": ...}`. They paste both into a private file themselves:
-   `{"botToken": "...", "chatId": "..."}` at `~/.simple-factory/telegram.json` (mode 600). Do not read it back to them.
+   `{"botToken": "...", "chatId": "..."}` at `~/.reins/telegram.json` (mode 600). Do not read it back to them.
    (d) Any extra meter they want (for example a cloud bill): a name, a limit, monthly or weekly, and a command
    that prints `{"used": n}` with an optional forecast. Optional; skip unless they ask.
-3. **Write the config** at `~/.simple-factory/factory.config.json`, starting from `factory.config.example.json`
+3. **Write the config** at `~/.reins/reins.config.json`, starting from `reins.config.example.json`
    and keeping only what applies. Set each tool's everyday model and its tiers from what that tool offers today
    (its `/model` list and the vendor's "which model" page), not from the example's names, which will age; see
    "Choosing the model" in `COORDINATOR.md`. Leave `"live": false` for now. Copy `state-of-play.template.md` to
-   `~/.simple-factory/state-of-play.md`.
+   `~/.reins/state-of-play.md`.
 4. **Claude usage meter only:** ask the owner to run `claude` once in this folder and accept the
    "do you trust this folder" question themselves.
 5. **Install the two LaunchAgents.** For each file in `launchd/`, replace `__BUN__` (`which bun`), `__REPO__`
@@ -45,3 +45,38 @@ if this is not a Mac.
    Then read `COORDINATOR.md` and follow it from now on.
 
 Publishing changes to this code? Install the pre-push check described in `CONTRIBUTING.md` first.
+
+## Moving from the old name
+
+Let any running jobs finish first. From the Reins checkout, fill in the two new plists as in step 5, using
+the full path to `~/.reins` for `__PRIVATE__`. Save them in `~/Library/LaunchAgents` and run this block
+to move the data and load the new agents.
+
+```sh
+(
+  set -e
+  if [ -e "$HOME/.reins" ] || [ -L "$HOME/.reins" ]; then
+    echo '~/.reins already exists. Move it aside before continuing.' >&2
+    exit 1
+  fi
+  domain="gui/$(id -u)"
+  agents="$HOME/Library/LaunchAgents"
+  for label in com.simple-factory.watch com.simple-factory.page; do
+    if launchctl print "$domain/$label" >/dev/null 2>&1; then
+      launchctl bootout "$domain/$label"
+    fi
+  done
+  mv "$HOME/.simple-factory" "$HOME/.reins"
+  if [ -f "$HOME/.reins/factory.config.json" ]; then
+    mv "$HOME/.reins/factory.config.json" "$HOME/.reins/reins.config.json"
+    sed -i '' 's|/\.simple-factory|/.reins|g' "$HOME/.reins/reins.config.json"
+  fi
+  rm -f "$agents/com.simple-factory.watch.plist" "$agents/com.simple-factory.page.plist"
+  launchctl bootstrap "$domain" "$agents/com.reins.watch.plist"
+  launchctl bootstrap "$domain" "$agents/com.reins.page.plist"
+  bun doctor.ts
+)
+```
+
+If you set `SIMPLE_FACTORY_CONFIG` or `FACTORY_PRIVATE_DIR` in your shell, update those exports to
+`REINS_CONFIG` or `REINS_PRIVATE_DIR` and point them at the new paths before running the block.

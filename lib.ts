@@ -1,4 +1,4 @@
-// Shared plain-file helpers for the simple factory. No model call anywhere in this project.
+// Shared plain-file helpers for Reins. No model call anywhere in this project.
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Config, ProviderName } from "./config";

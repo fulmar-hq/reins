@@ -1,14 +1,16 @@
-# Simple factory
+# Reins
 
-A thin layer over **Claude Code** and **Codex** for one person (the owner) working with one long-running
-coordinator chat. It works with either tool alone or both. It is plain code: it makes no model calls,
-needs no model API keys, and only starts the tools' own commands (`codex exec`, `claude -p`) under the
-sign-in you already have.
+**Claude Code** and **Codex** do the pulling. Reins gives you a light touch to steer the work and feel when
+something is wrong. It adds a watchdog, a ticket board and a usage page for you and your coordinator chat,
+whether you use one harness or both.
+
+Reins makes no model calls and needs no model API keys. It starts the harnesses' own commands
+(`codex exec`, `claude -p`) under the sign-in you already have.
 
 What it adds on top of the tools:
 
-- **Work keeps moving when nobody is watching.** A watcher that uses no tokens notices a finished, silent,
-  runaway or stuck job, or ready work with nothing running, and wakes the coordinator with exactly what changed.
+- **Work keeps moving when nobody is watching.** The watchdog wakes the coordinator when a job finishes,
+  goes silent, runs past a cap or gets stuck, or when work is ready and nothing is running. It uses no tokens.
 - **One page across both tools**: what needs you, what is running, your tickets, what shipped, and whether usage is on track.
 - **It reaches you only when a decision is yours** (see "When it texts you").
 - **A repeatable routine with a record**: one ticket, one builder, one fresh reviewer, every job in a ledger.
@@ -22,7 +24,7 @@ Requirements: macOS (launchd is the only scheduler supported so far), [Bun](http
 Claude usage meter), and at least one of Codex or Claude Code, installed and signed in by you. One tool is enough.
 
 ```sh
-git clone <this repository> simple-factory && cd simple-factory
+git clone https://github.com/fulmar-hq/reins.git && cd reins
 bun install
 bun doctor.ts        # says what it found; "watcher has never run" is expected before setup
 ```
@@ -38,14 +40,14 @@ subfolder; run them from that subfolder.)
 |---|---|
 | `run.ts` | Starts one disposable job with the tool's own command, in its own run folder, and returns at once. |
 | `watch.ts` | Runs every 60 seconds: closes jobs, reads meters, records events, wakes the coordinator, writes `state.json`. |
-| `page.ts` | One read-only page on `http://127.0.0.1:4319`, drawn from `state.json`. |
-| `ticket.ts` | The coordinator's one-line commands for `tickets.json`. |
+| `page.ts` | The read-only usage page on `http://127.0.0.1:4319`, drawn from `state.json`. |
+| `ticket.ts` | The coordinator's commands for the ticket board in `tickets.json`. |
 | `notify-owner.ts` | Opens, reconfirms or resolves an owner ask. |
 | `wait.ts` | The coordinator's wake: blocks without tokens until the watcher has news. |
 | `doctor.ts` | Says in plain words what works and what is missing. |
 | `privacy-check.ts` | Stops private details from being published (see CONTRIBUTING.md). |
 
-Everything it knows lives in small files in your private folder (default `~/.simple-factory`): `factory.config.json`,
+Everything it knows lives in small files in your private folder (default `~/.reins`): `reins.config.json`,
 `tickets.json`, `state-of-play.md`, `ledger.jsonl`, `events.jsonl`, `state.json`, and `work/jobs/<date>-<name>/`
 holding each job's `prompt.txt`, `log.txt` and `result.txt`.
 
@@ -106,8 +108,9 @@ cannot be read is `null`, never a guess.
 
 ## Configuration
 
-One file, `factory.config.json` in the private folder; see `factory.config.example.json`. It sets which tools are
-enabled, their everyday model and effort, named **tiers** for other kinds of task (`hard`, `review`, `bulk`,
+Reins reads `reins.config.json` in the private folder. Set `REINS_PRIVATE_DIR` to use a different private folder
+or `REINS_CONFIG` to point directly to another config file. See `reins.config.example.json`.
+The config sets which tools are enabled, their everyday model and effort, named **tiers** for other kinds of task (`hard`, `review`, `bulk`,
 `visual`; see "Choosing the model" in `COORDINATOR.md`) and extra arguments, the caps, the timezone, how the owner and coordinator are
 reached, `notify.live` (false means dry-run: nothing leaves this machine; the coordinator's wake file is still written), and optional **extra meters**: a name, a limit, a
 monthly or weekly reset, and a command that prints `{"used": n}` with optional `forecast` and `limit`. With no
@@ -115,12 +118,12 @@ file, every installed tool is enabled and nothing is sent.
 
 ## Uninstall
 
-`launchctl bootout gui/$(id -u)/com.simple-factory.watch; launchctl bootout gui/$(id -u)/com.simple-factory.page`,
+`launchctl bootout gui/$(id -u)/com.reins.watch; launchctl bootout gui/$(id -u)/com.reins.page`,
 then delete the two files from `~/Library/LaunchAgents`. Your private folder is left alone; delete it yourself if you wish.
 
 ## Cost and limits
 
-The factory itself makes no model calls. Every 15 minutes it asks each tool for its usage: Codex through its own
+Reins itself makes no model calls. Every 15 minutes it asks each tool for its usage: Codex through its own
 status call, and Claude Code by opening its own `/usage` panel in a new, separate process and typing only that
 command. No prompt is sent, and the reader refuses any reading unless the panel itself reports zero input and
 zero output tokens for that session; that is the tool's own counter, not an independent bill. Extra-meter commands
