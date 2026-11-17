@@ -6,6 +6,7 @@ import { loadConfig, type Config } from "./config";
 import { KINDS, clock, count, files, percent } from "./lib";
 import type { Meter } from "./meters";
 import { askEnded } from "./notify";
+import { showMinutes } from "./ticket";
 import type { State } from "./watch";
 
 // Access: bound to loopback only, the Host header must be exactly the loopback address (so a page on
@@ -32,9 +33,10 @@ const bar = (used: number | null, cap: number, tone = "info") => {
 };
 const health = (tone: string, text: string) => `<span class="health ${tone}"><span aria-hidden="true" class="dot"></span><span>${text}</span></span>`;
 const stageTone = { ready: "neutral", building: "info", "in review": "review", "needs owner": "warn", shipped: "good" };
+const paceTone = { "on track": "good", "a little over": "warn", "very over": "bad" };
 
 export function render(s: State, now = Date.now()): string {
-  const at = clock(s.timezone).at, split = s.split as Record<string, number | string>, total = Number(split.total);
+  const time = clock(s.timezone), at = time.at, today = time.day(now), split = s.split as Record<string, number | string>, total = Number(split.total);
   const share = (key: string) => `${key} ${total ? percent(Number(split[key]) / total) : "0%"}`;
   const ago = (from: number | null) => from === null ? "never" : `${at(from)} (${span(now - from)} ago)`;
   const meter = (m: Meter) => {
@@ -55,9 +57,23 @@ export function render(s: State, now = Date.now()): string {
   const running = (j: State["running"][number]) => `<strong>${esc(j.name)}</strong> <span class="quiet">${jobInfo(j)}</span>`
     + `<p>${esc(j.minutes ?? 0)} of ${esc(j.capMinutes)} minutes</p>${bar(j.minutes ?? 0, j.capMinutes)}`
     + `<p>${esc(count(j.tokens?.fresh))} of ${esc(count(j.capTokens))} tokens</p>${bar(j.tokens?.fresh ?? null, j.capTokens)}`;
-  const ticket = (t: State["tickets"][number]) => `<strong>${esc(t.title)}</strong>${link(t.link)}<br><span class="quiet">${esc(span(now - Date.parse(t.updated)))} in this stage`
-    + `${t.running ? ` · running: ${esc(t.running)}` : ""}${t.jobs ? ` · so far ${esc(t.minutes)} min, ${esc(count(t.tokens))} tokens over ${esc(t.jobs)} job${t.jobs > 1 ? "s" : ""}` : ""}</span>`;
+  const prediction = (n: number | null | undefined) => n == null ? "no estimate yet" : `predicted ${showMinutes(n)} min`;
+  const ticketPace = (t: State["tickets"][number]) => {
+    const { elapsed, predicted, state } = t.timing ?? {};
+    const detail = `<p class="quiet">${elapsed == null ? "" : `${showMinutes(elapsed)} min elapsed · `}${prediction(predicted)}</p>`;
+    if (!state) return detail;
+    return detail + chip(state, paceTone[state]) + (predicted === 0 ? bar(Number(elapsed! > 0), 1, paceTone[state]) : bar(elapsed!, predicted!, paceTone[state]));
+  };
+  const ticket = (t: State["tickets"][number]) => {
+    return `<strong>${esc(t.title)}</strong>${link(t.link)}${t.stage === "shipped" ? "" : ticketPace(t)}`
+      + (t.due ? `<p class="quiet">Due ${esc(t.due)}</p>` : "")
+      + `<p class="quiet">${span(now - Date.parse(t.updated))} in this stage`
+      + `${t.running ? ` · running: ${esc(t.running)}` : ""}${t.jobs ? ` · so far ${esc(t.minutes)} min, ${esc(count(t.tokens))} tokens over ${esc(t.jobs)} job${t.jobs > 1 ? "s" : ""}` : ""}</p>`;
+  };
   const stage = (name: string) => s.tickets.filter(t => t.stage === name).sort((a, b) => name === "ready" ? a.order - b.order : Date.parse(b.updated) - Date.parse(a.updated)).slice(0, name === "shipped" ? 10 : 100);
+  const shippedToday = s.tickets.filter(t => t.stage === "shipped" && time.day(Date.parse(t.updated)) === today)
+    .sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated))
+    .map(t => `<strong>${esc(t.title)}</strong>${link(t.link)}` + (t.shipment ? `<p>${esc(t.shipment.proof)}</p>` : ""));
   const deadline = new Intl.DateTimeFormat("en", { timeZone: s.timezone, dateStyle: "medium", timeStyle: "long" });
   const needs = [...s.ownerAsks.filter(a => !("question" in a) || !askEnded(a, now)).map(a => "text" in a
     ? `${esc(a.text)} <span class="quiet">${esc(a.id ?? "")}</span>`
@@ -73,7 +89,8 @@ export function render(s: State, now = Date.now()): string {
       const tickets = stage(name);
       return tickets.length ? `<h3>${chip(name[0]!.toUpperCase() + name.slice(1), stageTone[name] ?? "neutral")}</h3>${list(tickets.map(ticket), "")}` : "";
     }).join("") : `<p class="quiet">No tickets yet.</p>`],
-    ["Shipped today", list(s.shippedToday.map(j => `<strong>${esc(j.name)}</strong><br><span class="quiet">${jobInfo(j)} · ${esc(Math.round(j.minutes ?? 0))} minutes · ${esc(count(j.tokens?.fresh))} tokens</span>`), "No job has finished today.")
+    ["Shipped today", list(shippedToday, "No ticket shipped today.")
+      + (s.shippedToday.length ? `<h3>Finished jobs</h3>${list(s.shippedToday.map(j => `<strong>${esc(j.name)}</strong><br><span class="quiet">${jobInfo(j)} · ${esc(Math.round(j.minutes ?? 0))} minutes · ${esc(count(j.tokens?.fresh))} tokens</span>`), "")}` : "")
       + (s.stoppedToday.length ? `<h3>Stopped today</h3>${list(s.stoppedToday.map(j => `<strong>${esc(j.name)}</strong><br><span class="warn">${esc(j.reason)}</span>`), "")}` : "")
       + `<p class="quiet">Today's usage: ${[...KINDS, "overhead"].filter(k => k !== "specialist" || Number(split.specialist) > 0).map(share).map(esc).join(" / ")} (${esc(count(total))} tokens; overhead is use outside launched jobs, where the tool records it)</p>`],
     ["Notes", list(s.notes.map(esc), "No notes yet.")],
