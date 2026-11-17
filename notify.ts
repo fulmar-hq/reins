@@ -2,7 +2,7 @@
 // wake file is still written, because a job that finishes unnoticed is the failure this project exists to prevent.
 import { appendFileSync, closeSync, fstatSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import type { Channel, Config } from "./config";
-import { appendLine, files, readLines, withLock, type Event } from "./lib";
+import { appendLine, files, readLines, withLock, type Ask, type Event } from "./lib";
 
 export type Message = { to: "coordinator" | "owner"; summary: string; body: string };
 
@@ -68,27 +68,115 @@ export function newsHealth(cfg: Config, events: Event[], now: number) {
   return { lastTaken, wakeWarning: minutes === null ? null : `News has been waiting ${minutes} minutes; nobody is listening: start bun wait.ts` };
 }
 
-/** The only door to the owner. At most `ownerMaxPerDay` texts in any 24 hours; past that the text is held and shown on the page.
- *  The slot is reserved in the events file, under a lock, before anything is sent: two asks at once cannot both take the
- *  last slot, and a delivery that is interrupted has already used its slot. The outcome is recorded afterwards. */
-export async function textOwner(cfg: Config, text: string, type: "owner-ask" | "unresponsive", live: boolean, now = Date.now()): Promise<Event & { outcome: string }> {
-  const f = files(cfg), day = 24 * 3600000;
-  let event: Event;
-  try { event = withLock(f.lock, () => {
-    const taken = readLines<Event>(f.events).filter(e => (e.type === "owner-ask" || e.type === "unresponsive") && !e.held && now - Date.parse(e.at) < day).length;
+const reasons = ["sign-in or credential", "spending past a limit", "message to a real person", "change to a live system for a real customer", "product taste"];
+const day = 86400000;
+const oneLine = (text: string | undefined): text is string => Boolean(text?.trim()) && !/[\r\n\u2028\u2029]/.test(text!);
+
+function readAsk(args: string[], now: number): Ask {
+  const [question, recommendation, reason, deadline, action, ...extra] = args.map(s => s.trim());
+  const sentence = question?.replace(/\b([ap])\.m\./gi, "$1m") ?? "";
+  if (!oneLine(question) || !/^[^?]+\?$/.test(question) || !/[\p{L}\p{N}]/u.test(question) || /[.!]["'”’)]*\s+\p{Ll}/u.test(sentence)
+    || [...new Intl.Segmenter("en", { granularity: "sentence" }).segment(sentence)].length !== 1)
+    throw Error("Give one question in a single sentence ending in a question mark.");
+  if (!oneLine(recommendation) || recommendation.startsWith("--")) throw Error("Give the coordinator's recommendation on one line.");
+  if (!reason || !reasons.includes(reason)) throw Error(`Choose one reason: ${reasons.join(", ")}.`);
+  if (deadline === "--no-safe-default") {
+    if (action !== undefined) throw Error("Use --no-safe-default on its own, or give a deadline and a default action.");
+    if (!reasons.slice(0, 2).includes(reason)) throw Error("Only sign-in or credential and spending past a limit can have no safe default.");
+    return { question, recommendation, reason, fallback: null };
+  }
+  if (!deadline || !oneLine(action) || action.startsWith("--") || extra.length) throw Error("Give a deadline and one default action, or use --no-safe-default on its own.");
+  const at = Date.parse(deadline);
+  if (!Number.isFinite(at) || new Date(at).toISOString().replace(".000Z", "Z") !== deadline || at <= now)
+    throw Error("Give a future UTC deadline in YYYY-MM-DDTHH:mm:ssZ format.");
+  return { question, recommendation, reason, fallback: { at, action } };
+}
+
+export type OpenAsk = Ask & { id: string; at: string; confirmedAt: number; reviewBy: number | null; held?: boolean };
+export function openAsks(events: Event[]): OpenAsk[] {
+  const open = new Map<string, OpenAsk>();
+  for (const e of events) {
+    if (e.type === "owner-ask" && e.ask)
+      open.set(e.key, { ...e.ask, id: e.key, at: e.at, confirmedAt: Date.parse(e.at), reviewBy: null, held: e.held });
+    const ask = e.askId && open.get(e.askId);
+    if (!ask) continue;
+    if (e.type === "owner-recheck") ask.reviewBy = Date.parse(e.at) + day;
+    if (e.type === "owner-reconfirmed") { ask.confirmedAt = Date.parse(e.at); ask.reviewBy = null; }
+    if (["owner-resolved", "owner-default", "owner-dropped"].includes(e.type)) open.delete(ask.id);
+  }
+  return [...open.values()];
+}
+
+export function legacyAsks(events: Event[]) {
+  const cleared = events.findLastIndex(e => e.type === "owner-resolved" && !e.askId);
+  const answered = new Set(events.filter(e => e.type === "owner-resolved").map(e => e.askId));
+  return events.slice(cleared + 1).filter(e => e.type === "owner-ask" && !e.ask && !answered.has(e.key));
+}
+
+export function askEnded(ask: OpenAsk, now: number) {
+  if (ask.reviewBy !== null && ask.reviewBy <= now && ask.reviewBy < (ask.fallback?.at ?? Infinity)) return "owner-dropped";
+  if (ask.fallback && ask.fallback.at <= now) return "owner-default";
+}
+
+function askEvent(id: string, type: string, text: string, now: number, quiet = false): Event {
+  return { key: `${type}:${id}:${now}`, askId: id, at: new Date(now).toISOString(), type, text, quiet };
+}
+
+export function updateAsk(cfg: Config, action: "resolved" | "reconfirm", id: string | undefined, answer?: string, now = Date.now()) {
+  if (!id) throw Error("Give the ask ID.");
+  if (action === "resolved" && !oneLine(answer)) throw Error("Give the answer or the action taken on one line.");
+  const f = files(cfg);
+  withLock(f.lock, () => {
+    const events = readLines<Event>(f.events), ask = openAsks(events).find(a => a.id === id);
+    const latestDefault = events.findLast(e => e.askId === id && (e.type === "owner-default" || e.type === "owner-default-taken"));
+    if (action === "resolved" && latestDefault?.type === "owner-default") {
+      appendLine(f.events, askEvent(id, "owner-default-taken", `default taken — ${id}: ${answer!.trim()}`, now, true));
+      return;
+    }
+    const question = ask && !askEnded(ask, now) ? ask.question : action === "resolved" ? legacyAsks(events).find(e => e.key === id)?.text : undefined;
+    if (!question) throw Error("There is no open ask or pending default with that ID.");
+    appendLine(f.events, action === "resolved"
+      ? askEvent(id, "owner-resolved", `${question} Owner's answer: ${answer!.trim()}`, now, true)
+      : askEvent(id, "owner-reconfirmed", `Reconfirmed: ${question}`, now, true));
+  });
+}
+
+export function reviewAsks(cfg: Config, now: number): OpenAsk[] {
+  const f = files(cfg);
+  return withLock(f.lock, () => openAsks(readLines<Event>(f.events)).filter(ask => {
+    const ended = askEnded(ask, now);
+    const label = `${ask.id} · ${ask.question}`;
+    if (ended === "owner-default")
+      appendLine(f.events, askEvent(ask.id, ended, `default due — ${label} take the default now: ${ask.fallback!.action}`, now));
+    else if (ended === "owner-dropped")
+      appendLine(f.events, askEvent(ask.id, ended, `dropped: not reconfirmed — ${label}`, now));
+    else if (ask.reviewBy === null && now - ask.confirmedAt >= 2 * day) {
+      appendLine(f.events, askEvent(ask.id, "owner-recheck", `Check this ask against the facts and reconfirm within one day: ${label}`, now));
+      ask.reviewBy = now + day;
+    }
+    return !ended;
+  }));
+}
+
+/** Accept the ask and reserve its text slot together under the existing lock.
+ *  Failed or interrupted deliveries still use the slot. Legacy alerts count until their 24 hours are up. */
+export async function textOwner(cfg: Config, args: string[], live: boolean, now = Date.now()): Promise<Event & { outcome: string }> {
+  const ask = readAsk(args, now), f = files(cfg), type = "owner-ask";
+  const text = `${ask.question}\nI recommend: ${ask.recommendation}\nReason: ${ask.reason}\n`
+    + (ask.fallback ? `If no answer by ${new Date(ask.fallback.at).toISOString()}, I will ${ask.fallback.action}` : "No safe default exists.");
+  const event = withLock(f.lock, () => {
+    const activity = readLines<Event>(f.events);
+    if (openAsks(activity).filter(a => !askEnded(a, now)).length >= 3) throw Error("Three asks are already open. Close one before adding another.");
+    const taken = activity.filter(e => (e.type === "owner-ask" || e.type === "unresponsive") && !e.held && now - Date.parse(e.at) < day).length;
     const held = taken >= cfg.notify.ownerMaxPerDay;
-    // A coordinator's own ask is quiet (it already knows); a held text or a watcher alarm is also told to the coordinator.
-    const reserved: Event = { key: `${type}:${now}:${Math.random().toString(36).slice(2, 8)}`, at: new Date(now).toISOString(), type,
-      text: held ? `Held, not sent to the owner (daily limit): ${text}` : text, quiet: type === "owner-ask" && !held, held };
+    const reserved: Event = { key: crypto.randomUUID(), at: new Date(now).toISOString(), type, ask,
+      text: held ? `Held, not sent to the owner (daily limit): ${ask.question}` : text, quiet: !held, held };
     appendLine(f.events, reserved);
     return reserved;
-  }); }
-  // Fail closed: if the slot cannot be reserved, the text is held, never sent.
-  catch (error) { return { key: `${type}:${now}:unreserved`, at: new Date(now).toISOString(), type, text, held: true, outcome: `held: ${error instanceof Error ? error.message : String(error)}` }; }
+  });
   if (event.held) return { ...event, outcome: `held: the limit of ${cfg.notify.ownerMaxPerDay} owner texts a day is reached` };
   const outcome = await send(cfg, { to: "owner", summary: text, body: "" }, live).catch(error => `failed: ${error instanceof Error ? error.message : String(error)}`);
   appendLine(f.events, { key: `owner-outcome:${event.key}`, at: new Date().toISOString(), type: "owner-outcome", text: `Text to the owner ${outcome}: ${text}`, quiet: !outcome.startsWith("failed") } satisfies Event);
-  if (outcome.startsWith("failed")) throw Error(outcome);
   return { ...event, outcome };
 }
 

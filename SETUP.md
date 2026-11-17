@@ -16,7 +16,7 @@ if this is not a Mac.
    find `"chat":{"id": ...}`. They paste both into a private file themselves:
    `{"botToken": "...", "chatId": "..."}` at `~/.simple-factory/telegram.json` (mode 600). Do not read it back to them.
    (d) Any extra meter they want (for example a cloud bill): a name, a limit, monthly or weekly, and a command
-   that prints `{"used": n}`. Optional; skip unless they ask.
+   that prints `{"used": n}` with an optional forecast. Optional; skip unless they ask.
 3. **Write the config** at `~/.simple-factory/factory.config.json`, starting from `factory.config.example.json`
    and keeping only what applies. Set each tool's everyday model and its tiers from what that tool offers today
    (its `/model` list and the vendor's "which model" page), not from the example's names, which will age; see
@@ -39,7 +39,8 @@ if this is not a Mac.
      or configure a command wake and test it in step 8.
 8. **Go live** only when the owner says so: set `"live": true`. The file wake works in dry-run. Owner texts and
    other wake channels need live sending. To verify a command wake, launch one small real job after enabling
-   live sending and see its finish arrive in this coordinator chat.
+   live sending and see its finish arrive in this coordinator chat. Only accepted structured asks can text the
+   owner. Check the [ask commands](COORDINATOR.md#when-to-text-the-owner) before opening one.
 9. **Report** to the owner: what is on, the page address, how they will be reached, and anything doctor still lists.
    Then read `COORDINATOR.md` and follow it from now on.
 

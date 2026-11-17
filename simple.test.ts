@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { loadConfig } from "./config";
 import { spawn } from "node:child_process";
 import { files, jobs, pace, processStarted, readLines, withLock, type Event, type Job } from "./lib";
-import { send, takeNews, textOwner } from "./notify";
+import { send, takeNews, textOwner, updateAsk } from "./notify";
 import { render } from "./page";
 import { launch, plan } from "./run";
 import { batch, pass, stop } from "./watch";
@@ -14,6 +14,7 @@ const scratch = (extra: Record<string, unknown> = {}) => {
   const root = mkdtempSync(join(tmpdir(), "simple-factory-"));
   return loadConfig(join(root, "factory.config.json"), { privateDir: root, timezone: "UTC", providers: { codex: { enabled: true } }, ...extra });
 };
+const sampleAsk = ["Can you sign in again?", "Renew the existing sign-in.", "sign-in or credential", "--no-safe-default"];
 
 // Rule: a job past its cap is stopped, so a runaway job cannot keep spending. Made-up job, no model.
 test("a job over its cap is stopped and the ledger says why", async () => {
@@ -92,25 +93,49 @@ test("a process whose identity cannot be confirmed is never signalled", async ()
 });
 
 // Rule: a lock that cannot be taken must fail in bounded time, and then the owner text is held, not sent.
-test("a stuck lock times out and holds the owner text", async () => {
+test("a stuck lock times out without accepting or texting an ask", async () => {
   const cfg = scratch({ notify: { owner: { channel: "command", command: ["/made-up/does-not-exist"] } } }), lock = files(cfg).lock;
   expect(withLock(join(cfg.privateDir, "missing", "parent", "x.lock"), () => "ran")).toBe("ran"); // missing parent folder is created
   mkdirSync(join(lock, "stuck"), { recursive: true }); utimesSync(lock, 0, 0); // stale, and not removable because it is not empty
   const started = Date.now();
   expect(() => withLock(lock, () => "ran", 200)).toThrow(/Could not take the lock/);
   expect(Date.now() - started).toBeLessThan(2000);
-  const text = await textOwner(cfg, "Made-up ask?", "owner-ask", true); // waits out the default 5 seconds, then holds
-  expect(text.held).toBe(true);
+  await expect(textOwner(cfg, sampleAsk, true)).rejects.toThrow(/Could not take the lock/);
+  expect(readLines(files(cfg).events)).toHaveLength(0);
 }, 15000);
 
 // Rule: the owner is never texted more than the daily limit, even when two asks race or a delivery fails midway.
 test("owner texts cannot exceed the daily limit", async () => {
   const cfg = scratch({ notify: { ownerMaxPerDay: 1, owner: { channel: "command", command: ["/made-up/does-not-exist"] } } });
-  const both = await Promise.all([textOwner(cfg, "Made-up ask one?", "owner-ask", false), textOwner(cfg, "Made-up ask two?", "owner-ask", false)]);
+  const both = await Promise.all([textOwner(cfg, sampleAsk, false), textOwner(cfg, sampleAsk, false)]);
   expect(both.filter(sent => !sent.held)).toHaveLength(1);
   const failing = scratch({ notify: { ownerMaxPerDay: 1, owner: { channel: "command", command: ["/made-up/does-not-exist"] } } });
-  await expect(textOwner(failing, "Made-up ask?", "owner-ask", true)).rejects.toThrow(); // delivery fails after the slot was taken
-  expect((await textOwner(failing, "Made-up retry?", "owner-ask", true)).held).toBe(true); // so a retry cannot slip past the limit
+  expect((await textOwner(failing, sampleAsk, true)).outcome).toStartWith("failed:"); // delivery fails after the slot was taken
+  expect((await textOwner(failing, sampleAsk, true)).held).toBe(true);
+});
+
+test("an ask without the required parts is refused", async () => {
+  const cfg = scratch();
+  await expect(textOwner(cfg, ["Can you sign in again?"], false)).rejects.toThrow("recommendation");
+  expect(readLines(files(cfg).events)).toHaveLength(0);
+});
+
+test("an expired ask leaves the list and the coordinator is told to take the default", async () => {
+  const cfg = scratch({ providers: {} }), now = Date.now();
+  const deadline = new Date(now + 60000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const ask = await textOwner(cfg, ["Should the menu open on hover?", "Keep it click-only.", "product taste", deadline, "keep it click-only"], false, now);
+  expect((await pass({ cfg, now })).ownerAsks).toHaveLength(1);
+  const state = await pass({ cfg, now: now + 60000 });
+  expect(state.ownerAsks).toHaveLength(0);
+  expect(state.notes[0]).toContain("default due");
+  expect(state.notes[0]).toContain("The coordinator has been told.");
+  expect(state.notes[0]).not.toContain("default taken");
+  let wake = "";
+  expect(takeNews(cfg, text => { wake = text; })).toBe(true);
+  expect(wake).toContain("take the default now: keep it click-only");
+  updateAsk(cfg, "resolved", ask.key, "Kept it click-only.", now + 60001);
+  expect((await pass({ cfg, now: now + 60001 })).notes[0]).toContain("default taken");
+  expect(() => updateAsk(cfg, "resolved", ask.key, "Kept it click-only.", now + 60002)).toThrow();
 });
 
 // Rule: news for the coordinator is handed over exactly once and never skipped, or a stall goes unseen.

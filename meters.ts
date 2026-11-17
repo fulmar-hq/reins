@@ -5,14 +5,14 @@ import { exec, pace, percent } from "./lib";
 import { PROVIDERS } from "./providers";
 
 export type Meter = {
-  id: string; label: string; used: number | null; detail: string | null; start: number | null; resetsAt: number | null;
+  id: string; label: string; used: number | null; forecast?: number; detail: string | null; start: number | null; resetsAt: number | null;
   observedAt: number | null; checkedAt: number; verdict: string | null; runsOutAt: number | null; unknownSince: number | null; reason: string | null;
 };
 const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
 export function reading(id: string, label: string, used: number, start: number | null, resetsAt: number, observedAt: number, detail: string | null = null, forecast?: number): Meter {
   const p = start === null ? null : pace(used, start, resetsAt, observedAt, forecast);
-  return { id, label, used, detail, start, resetsAt, observedAt, checkedAt: observedAt, verdict: p?.verdict ?? null, runsOutAt: p?.runsOutAt ?? null, unknownSince: null, reason: null };
+  return { id, label, used, forecast, detail, start, resetsAt, observedAt, checkedAt: observedAt, verdict: p?.verdict ?? null, runsOutAt: p?.runsOutAt ?? null, unknownSince: null, reason: null };
 }
 /** A failed read: the previous real values, marked with why they are old; or one "unknown since" row. */
 function kept(old: Meter[], id: string, label: string, now: number, reason: string): Meter[] {

@@ -40,7 +40,7 @@ subfolder; run them from that subfolder.)
 | `watch.ts` | Runs every 60 seconds: closes jobs, reads meters, records events, wakes the coordinator, writes `state.json`. |
 | `page.ts` | One read-only page on `http://127.0.0.1:4319`, drawn from `state.json`. |
 | `ticket.ts` | The coordinator's one-line commands for `tickets.json`. |
-| `notify-owner.ts` | The coordinator's deliberate text to the owner. |
+| `notify-owner.ts` | Opens, reconfirms or resolves an owner ask. |
 | `wait.ts` | The coordinator's wake: blocks without tokens until the watcher has news. |
 | `doctor.ts` | Says in plain words what works and what is missing. |
 | `privacy-check.ts` | Stops private details from being published (see CONTRIBUTING.md). |
@@ -51,9 +51,10 @@ holding each job's `prompt.txt`, `log.txt` and `result.txt`.
 
 ## The page
 
-Six parts, in order: **Needs you**, **Running now** (name, minutes and tokens against the caps), **Tickets** by stage,
-**Shipped today** (with tokens, and today's usage split between build, review, investigation and overhead),
-**Meters** (used, when it resets, and a pace verdict: plenty left, on track, or too fast) and **Health** (when the
+The page shows **Needs you** (open asks), **Running now** (model and effort when recorded, minutes and tokens
+against the caps), **Tickets** by stage, **Shipped today** (model and effort when recorded, tokens, and today's usage
+split), **Meters** (usage, forecast when available, reset and pace), **Notes** (state-of-play notes and defaults
+due or taken) and **Health** (when the
 watcher last ran, when the coordinator last acted, whether sending is live). It is bound to this computer only;
 to see it on a phone, put your own signed-in tunnel in front of it.
 
@@ -77,11 +78,18 @@ at most one every 5 minutes.
 
 ## When it texts you
 
-Only when the coordinator needs you for something it cannot resolve itself. Progress, stalls, finished jobs and
-meter warnings never reach you; they go to the coordinator and the page. There are exactly two ways a text is sent:
-the coordinator runs `notify-owner.ts` on purpose, or the coordinator itself has not responded to waiting events
-for 30 minutes while work is waiting (one text, not repeated until it responds). At most 4 texts in 24 hours;
-beyond that a text is held on the page and the coordinator is told. Channels: Telegram (Bot API) or any command.
+Only an accepted ask from `bun notify-owner.ts ask` can send a text. Each ask has one question, a recommendation,
+a reason from the fixed list, and a default with a deadline or an allowed no-default reason. Up to three can
+be open. The watcher closes expired asks and tells the coordinator to take the default. It also asks the
+coordinator to check each ask after two days and drops it if it is not reconfirmed within a day. The coordinator
+records the owner's answer by ask ID. See [the coordinator's commands](COORDINATOR.md#when-to-text-the-owner).
+
+At most 4 texts in any 24 hours by default. After that the ask still appears on the page and the coordinator
+is told the text was held. Channels are Telegram (Bot API) or any command. Coordinator silence appears in Health.
+
+On upgrade, existing `needs owner` tickets stay in their ticket stage. Pending free-text asks and old
+`## Needs you` bullets in `state-of-play.md` remain visible. Resolve a free-text ask by its ID and remove
+old bullets once addressed. Move useful background into `## Notes`.
 
 ## The ledger
 
