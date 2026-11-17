@@ -6,6 +6,7 @@ import { loadConfig } from "./config";
 import { spawn } from "node:child_process";
 import { files, jobs, pace, processStarted, readLines, withLock, type Event, type Job } from "./lib";
 import { send, takeNews, textOwner } from "./notify";
+import { render } from "./page";
 import { launch, plan } from "./run";
 import { batch, pass, stop } from "./watch";
 
@@ -129,6 +130,19 @@ test("coordinator news is handed over once and never lost", async () => {
   expect(() => takeNews(cfg, () => { throw Error("made-up crash while writing"); })).toThrow(); // a crash before the output is written
   expect(take()).toBe(true); expect(got[2]).toMatch(/fourth/); // loses nothing: the next wait still gets it
   expect(readLines<Event>(files(cfg).events).filter(e => e.type === "ack")).toHaveLength(3); // only real hand-overs acknowledge
+});
+
+test("waiting news is reported until the coordinator takes it", async () => {
+  const cfg = scratch({ notify: { unansweredMinutes: 2 } });
+  await send(cfg, { to: "coordinator", summary: "Made-up finish", body: "" }, false);
+  const now = Date.now(), watch = (minutes: number) => pass({ cfg, now: now + minutes * 60000, meters: async () => [] });
+  expect((await watch(1)).wakeWarning).toBeNull();
+  const state = await watch(3);
+  expect(render(state)).toContain('<span class="bad">News has been waiting 3 minutes; nobody is listening: start bun wait.ts</span>');
+  expect(takeNews(cfg, () => {})).toBe(true);
+  const next = await watch(4);
+  expect(next.wakeWarning).toBeNull();
+  expect(next.lastTaken).toBeGreaterThanOrEqual(now);
 });
 
 // Rule: the costly model is used only when the coordinator asks for it; every other job gets the everyday one.

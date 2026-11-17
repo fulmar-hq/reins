@@ -1,6 +1,6 @@
 // Notifications behind one small function. Dry-run sends nothing outside this machine: the coordinator's own
 // wake file is still written, because a job that finishes unnoticed is the failure this project exists to prevent.
-import { appendFileSync, closeSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, fstatSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import type { Channel, Config } from "./config";
 import { appendLine, files, readLines, withLock, type Event } from "./lib";
 
@@ -11,10 +11,14 @@ export async function send(cfg: Config, message: Message, live: boolean): Promis
   const channel: Channel = cfg.notify[message.to];
   if (channel.channel === "none") return "no channel configured";
   const text = message.body ? `${message.summary}\n${message.body}` : message.summary;
-  if (channel.channel !== "file" && !live) return "dry-run";
+  if (!live && !(message.to === "coordinator" && channel.channel === "file")) return "dry-run";
   if (channel.channel === "file") {
     // The coordinator chat runs wait.ts in the background; it returns whatever has not been handed over yet.
-    appendFileSync(files(cfg).wake, `--- ${new Date().toISOString()}\n${text}\n`, { mode: 0o600 });
+    const f = files(cfg);
+    withLock(f.lock, () => {
+      appendFileSync(f.wake, `--- ${new Date().toISOString()}\n${text}\n`, { mode: 0o600 });
+      if (message.to === "coordinator") recordWake(f.events, message.summary);
+    });
     return "written";
   }
   if (channel.channel === "command") {
@@ -28,6 +32,40 @@ export async function send(cfg: Config, message: Message, live: boolean): Promis
     body: JSON.stringify({ chat_id: chatId, text }), signal: AbortSignal.timeout(15000) }).catch(() => null);
   if (!response?.ok) throw Error(`Telegram refused the message (${response?.status ?? "no answer"})`);
   return "sent";
+}
+
+export function recordWake(path: string, summary: string) {
+  const at = Date.now();
+  appendLine(path, { key: `wake:${at}`, at: new Date(at).toISOString(), type: "wake", text: summary, quiet: true } satisfies Event);
+}
+
+export function unansweredMinutes(cfg: Config, wakeAt: number, now: number): number | null {
+  const minutes = (now - wakeAt) / 60000;
+  return minutes >= cfg.notify.unansweredMinutes ? Math.round(minutes) : null;
+}
+
+function wakePosition(wake: string, size: number): number {
+  let from = 0;
+  try { from = Number(readFileSync(wake + ".delivered", "utf8")) || 0; } catch { /* nothing handed over yet */ }
+  return from > size ? 0 : from; // the wake file was replaced
+}
+
+function pendingWakeAt(wake: string): number {
+  try {
+    const fd = openSync(wake, "r");
+    try {
+      const header = Buffer.alloc(29); // "--- " + ISO timestamp + newline
+      readSync(fd, header, 0, header.length, wakePosition(wake, fstatSync(fd).size));
+      return Date.parse(header.toString().match(/^--- ([^\n]+)\n/)?.[1] ?? "");
+    } finally { closeSync(fd); }
+  } catch { return NaN; }
+}
+
+export function newsHealth(cfg: Config, events: Event[], now: number) {
+  const ack = events.findLast(e => e.type === "ack");
+  const lastTaken = ack ? Date.parse(ack.at) : null;
+  const minutes = cfg.notify.coordinator.channel === "file" ? unansweredMinutes(cfg, pendingWakeAt(files(cfg).wake), now) : null;
+  return { lastTaken, wakeWarning: minutes === null ? null : `News has been waiting ${minutes} minutes; nobody is listening: start bun wait.ts` };
 }
 
 /** The only door to the owner. At most `ownerMaxPerDay` texts in any 24 hours; past that the text is held and shown on the page.
@@ -60,16 +98,15 @@ export async function textOwner(cfg: Config, text: string, type: "owner-ask" | "
 export function takeNews(cfg: Config, deliver: (news: string) => void): boolean {
   const f = files(cfg), position = f.wake + ".delivered";
   return withLock(f.lock, () => {
-    const takenAt = Date.now(); // before reading: a wake recorded after this moment is not covered by this acknowledgement
-    let size = 0, from = 0;
+    let size = 0;
     try { size = statSync(f.wake).size; } catch { return false; }
-    try { from = Number(readFileSync(position, "utf8")) || 0; } catch { /* nothing handed over yet */ }
-    if (from > size) from = 0; // the wake file was replaced
+    const from = wakePosition(f.wake, size);
     if (size <= from) return false;
     const buffer = Buffer.alloc(size - from), fd = openSync(f.wake, "r");
     try { readSync(fd, buffer, 0, buffer.length, from); } finally { closeSync(fd); }
     deliver(buffer.toString("utf8"));
     writeFileSync(position + ".tmp", String(size)); renameSync(position + ".tmp", position);
+    const takenAt = Date.now();
     appendLine(f.events, { key: `ack:${takenAt}`, at: new Date(takenAt).toISOString(), type: "ack", text: "the coordinator took its news", quiet: true } satisfies Event);
     return true;
   });

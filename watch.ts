@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { enabledProviders, loadConfig, type Config } from "./config";
 import { KINDS, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, type Event, type Job, type Result, type Tokens } from "./lib";
 import { meterLine, readMeters, type Meter } from "./meters";
-import { send, textOwner, type Message } from "./notify";
+import { newsHealth, recordWake, send, textOwner, unansweredMinutes, type Message } from "./notify";
 import { PROVIDERS } from "./providers";
 import { STAGES, byStage, readTickets, type Ticket } from "./ticket";
 
@@ -81,11 +81,11 @@ export async function pass(o: Options = {}) {
   mkdirSync(cfg.privateDir, { recursive: true });
   let previous: any = {};
   try { previous = JSON.parse(readFileSync(f.state, "utf8")); } catch { /* first pass, or a torn file */ }
-  const stored = readLines<Event>(f.events), seen = new Set(stored.map(e => e.key)), errors: string[] = [], alreadyStored = stored.length;
+  const stored = readLines<Event>(f.events), seen = new Set(stored.map(e => e.key)), errors: string[] = [];
   const emit = (key: string, type: string, text: string, extra: Partial<Event> = {}) => {
     if (seen.has(key)) return;
     const event: Event = { key, at: new Date(now).toISOString(), type, text, ...extra };
-    seen.add(key); stored.push(event); appendLine(f.events, event);
+    seen.add(key); appendLine(f.events, event);
   };
 
   // 1. Jobs: finished, silent or over cap.
@@ -149,34 +149,35 @@ export async function pass(o: Options = {}) {
   // 4. Notify the coordinator: one batched message per 5 minutes.
   const shipped = ended.filter(j => j.result === "finished"), play = stateOfPlay(f.stateOfPlay);
   // A lost state file must not replay old events: everything already stored counts as delivered.
-  let cursor: Cursor = previous.notify ?? { delivered: alreadyStored, lastMailAt: 0 };
+  let cursor: Cursor = previous.notify ?? { delivered: stored.length, lastMailAt: 0 };
   const outbox: (Message & { at: string; outcome: string })[] = previous.outbox ?? [];
-  const next = batch(stored, cursor, now);
+  const next = batch(readLines<Event>(f.events), cursor, now);
   try {
     for (const message of next.messages) {
-      outbox.push({ ...message, at: new Date(now).toISOString(), outcome: await send(cfg, message, live) });
-      // Recorded after the hand-off, so "the coordinator was woken at this time" is never earlier than the truth.
-      const woke: Event = { key: `wake:${Date.now()}`, at: new Date().toISOString(), type: "wake", text: message.summary, quiet: true };
-      stored.push(woke); appendLine(f.events, woke);
+      const outcome = await send(cfg, message, live);
+      outbox.push({ ...message, at: new Date(now).toISOString(), outcome });
+      if (outcome === "sent") recordWake(f.events, message.summary);
     }
-    cursor = next.messages.length ? { ...next.cursor, delivered: stored.length } : next.cursor;
+    cursor = next.cursor;
   } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); } // nothing is marked delivered; the next pass tries again
 
   // The one automatic owner text: the coordinator was woken, has not acted since, and work is waiting.
   // It "acts" by running a ticket command, launching a job, taking its news (wait.ts), asking the owner, or rewriting its notes.
   // Everything here is derived from the append-only events file, so a lost state.json cannot cause a second text.
+  const activity = readLines<Event>(f.events);
+  const health = newsHealth(cfg, activity, now);
   const ACTS = ["ticket", "ack", "owner-ask", "owner-resolved"];
-  const lastSeen = Math.max(play.rewrittenAt ?? 0, ...stored.filter(e => ACTS.includes(e.type)).map(e => Date.parse(e.at)), ...all.map(j => Date.parse(j.started)));
-  const since = stored.filter(e => Date.parse(e.at) > lastSeen), unanswered = since.find(e => e.type === "wake");
+  const lastSeen = Math.max(play.rewrittenAt ?? 0, ...activity.filter(e => ACTS.includes(e.type)).map(e => Date.parse(e.at)), ...all.map(j => Date.parse(j.started)));
+  const since = activity.filter(e => Date.parse(e.at) > lastSeen);
+  const minutes = unansweredMinutes(cfg, Date.parse(since.find(e => e.type === "wake")?.at ?? ""), now);
   const unresponsiveAlerted = since.some(e => e.type === "unresponsive"), workWaiting = tickets.some(t => ["ready", "building", "in review"].includes(t.stage));
-  const coordinatorUnresponsive = unanswered !== undefined && workWaiting && now - Date.parse(unanswered.at) >= cfg.notify.unansweredMinutes * 60000;
+  const coordinatorUnresponsive = minutes !== null && workWaiting;
   if (coordinatorUnresponsive && !unresponsiveAlerted) try {
-    const minutes = Math.round((now - Date.parse(unanswered.at)) / 60000);
     const sent = await textOwner(cfg, `The coordinator chat has not responded for ${minutes} minutes and work is waiting. Please open it.`, "unresponsive", live, now);
-    stored.push(sent); outbox.push({ to: "owner", summary: sent.text, body: "", at: sent.at, outcome: sent.outcome });
+    activity.push(sent); outbox.push({ to: "owner", summary: sent.text, body: "", at: sent.at, outcome: sent.outcome });
   } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
-  const resolvedAt = Math.max(0, ...stored.filter(e => e.type === "owner-resolved").map(e => Date.parse(e.at)));
-  const ownerAsks = stored.filter(e => (e.type === "owner-ask" || e.type === "unresponsive") && Date.parse(e.at) > resolvedAt).map(e => ({ at: e.at, text: e.text, held: Boolean(e.held) }));
+  const resolvedAt = Math.max(0, ...activity.filter(e => e.type === "owner-resolved").map(e => Date.parse(e.at)));
+  const ownerAsks = activity.filter(e => (e.type === "owner-ask" || e.type === "unresponsive") && Date.parse(e.at) > resolvedAt).map(e => ({ at: e.at, text: e.text, held: Boolean(e.held) }));
 
   // 5. Everything the page needs.
   const row = (j: Job & { minutesSoFar?: number }) => ({ id: j.id, name: j.name, kind: j.kind, provider: j.provider, ticket: j.ticket, started: j.started, ended: j.ended,
@@ -185,6 +186,7 @@ export async function pass(o: Options = {}) {
     at: now, timezone: cfg.timezone, sending: live ? "live" : "dry-run", needsYou: play.needsYou, notes: play.notes, stateOfPlayAt: play.rewrittenAt,
     running: running.map(row), tickets: ticketRows, stages: STAGES, shippedToday: shipped.map(row), stoppedToday: ended.filter(j => j.result !== "finished").map(row),
     split: { day: today, ...split, overhead, total }, meters, metersAt, expiries, idleSince, ownerAsks, lastSeen, coordinatorUnresponsive,
+    ...health, fileWake: cfg.notify.coordinator.channel === "file",
     notify: cursor, outbox: outbox.slice(-10), errors,
   };
   writeFileSync(f.state + ".tmp", JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });

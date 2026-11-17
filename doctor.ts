@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
 // Self-check: says in plain words what works and what is missing. Exits 1 when the setup is broken.
-// It never signs in, never sends a message and never starts a job.
-import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
+// It only sends a local test message and never signs in or starts a job.
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { configPath, enabledProviders, loadConfig, type Channel, type Config } from "./config";
-import { files, percent } from "./lib";
+import { files, percent, readLines, withLock, type Event } from "./lib";
+import { newsHealth, send, takeNews } from "./notify";
 import { PROVIDERS, installed } from "./providers";
 
 let broken = 0;
@@ -39,7 +41,36 @@ const describe = (role: "owner" | "coordinator", c: Channel) => {
   } catch { missing(`The Telegram credentials file for the ${role} is missing or not JSON: ${c.credentialsFile}`); }
 };
 describe("owner", cfg.notify.owner); describe("coordinator", cfg.notify.coordinator);
-note(cfg.notify.live ? "Sending is LIVE." : "Sending is dry-run: messages are written to state.json only. Set notify.live to true when ready.");
+if (cfg.notify.coordinator.channel === "file") {
+  try {
+    const { wake, lock } = files(cfg), cursor = wake + ".delivered";
+    withLock(lock, () => {
+      for (const [path, mode] of [[wake, constants.R_OK | constants.W_OK], [cursor, constants.R_OK], [cursor + ".tmp", constants.W_OK]] as const) {
+        if (!existsSync(path)) continue;
+        if (!statSync(path).isFile()) throw Error(`${path} is not a file.`);
+        accessSync(path, mode);
+      }
+    });
+    // Use the wake file's directory, with a separate queue, cursor and events file.
+    const privateDir = mkdtempSync(join(dirname(wake), ".wake-test-"));
+    try {
+      const probe: Config = { ...cfg, privateDir, notify: { ...cfg.notify, coordinator: { channel: "file" } } };
+      const summary = "Doctor test message for the coordinator", body = "Testing the file wake and hand-over.";
+      await send(probe, { to: "coordinator", summary, body }, cfg.notify.live);
+      let received = "";
+      if (!takeNews(probe, news => { received = news; }) || received.replace(/^--- [^\n]+\n/, "") !== `${summary}\n${body}\n`)
+        throw Error("The hand-over did not return exactly the test message.");
+    } finally { rmSync(privateDir, { recursive: true, force: true }); }
+    ok("Coordinator wake test passed. The file hand-over returned the test message.");
+  } catch (error) { missing(`Coordinator wake test failed. ${error instanceof Error ? error.message : error}`); }
+} else note(`The coordinator wake was not tested for the "${cfg.notify.coordinator.channel}" channel.`);
+note(cfg.notify.live ? "Sending is LIVE." : `Texts to the owner are off (dry-run). The coordinator wake is ${cfg.notify.coordinator.channel === "file" ? "on" : "off"}.`);
+try {
+  const events = files(cfg).events;
+  if (existsSync(events)) accessSync(events, constants.W_OK);
+  const { wakeWarning } = newsHealth(cfg, readLines<Event>(events), Date.now());
+  if (wakeWarning) missing(process.stdout.isTTY && !process.env.NO_COLOR ? `\x1b[31m${wakeWarning}\x1b[0m` : wakeWarning);
+} catch (error) { missing(`Could not check events.jsonl. ${error instanceof Error ? error.message : error}`); }
 for (const m of cfg.extraMeters) Bun.which(m.command[0]!) || existsSync(m.command[0]!) ? ok(`Extra meter "${m.name}" has a command.`) : missing(`Extra meter "${m.name}": the command "${m.command[0]}" does not exist.`);
 
 let state: any = null;

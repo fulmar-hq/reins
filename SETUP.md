@@ -34,11 +34,12 @@ if this is not a Mac.
      and start it again.
    - Codex: run `bun wait.ts` as the last command of a turn; it blocks without using tokens and returns the
      news. If your Codex can be woken by a command, set the coordinator channel to `"command"` with that command instead.
-   - What is proven: `wait.ts` returns each piece of news exactly once, including news that arrived while you were
-     busy, and never replays it. What depends on your app: whether a background command that ends actually starts a
-     new turn in your chat. Try it once with the owner watching; if your app does not wake you, use the blocking
-     form or a `"command"` channel, and tell the owner which one you chose.
-8. **Go live** only when the owner says so: set `"live": true`. Until then messages are only recorded in `state.json`.
+   - File wake: make sure doctor's file wake test passes, then launch one small real job and see its finish
+     arrive in this coordinator chat. If a background wait ends without waking the chat, try the blocking form
+     or configure a command wake and test it in step 8.
+8. **Go live** only when the owner says so: set `"live": true`. The file wake works in dry-run. Owner texts and
+   other wake channels need live sending. To verify a command wake, launch one small real job after enabling
+   live sending and see its finish arrive in this coordinator chat.
 9. **Report** to the owner: what is on, the page address, how they will be reached, and anything doctor still lists.
    Then read `COORDINATOR.md` and follow it from now on.
 
