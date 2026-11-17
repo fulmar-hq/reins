@@ -1,4 +1,5 @@
-// Notifications behind one small function. Dry-run sends nothing at all.
+// Notifications behind one small function. Dry-run sends nothing outside this machine: the coordinator's own
+// wake file is still written, because a job that finishes unnoticed is the failure this project exists to prevent.
 import { appendFileSync, closeSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import type { Channel, Config } from "./config";
 import { appendLine, files, readLines, withLock, type Event } from "./lib";
@@ -9,8 +10,8 @@ export type Message = { to: "coordinator" | "owner"; summary: string; body: stri
 export async function send(cfg: Config, message: Message, live: boolean): Promise<string> {
   const channel: Channel = cfg.notify[message.to];
   if (channel.channel === "none") return "no channel configured";
-  if (!live) return "dry-run";
   const text = message.body ? `${message.summary}\n${message.body}` : message.summary;
+  if (channel.channel !== "file" && !live) return "dry-run";
   if (channel.channel === "file") {
     // The coordinator chat runs wait.ts in the background; it returns whatever has not been handed over yet.
     appendFileSync(files(cfg).wake, `--- ${new Date().toISOString()}\n${text}\n`, { mode: 0o600 });

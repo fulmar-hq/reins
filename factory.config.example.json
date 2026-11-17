@@ -2,8 +2,15 @@
   "timezone": "America/Toronto",
   "defaultProvider": "codex",
   "providers": {
-    "codex": { "enabled": true, "model": "gpt-6.1-sol", "effort": "high", "args": [] },
-    "claude": { "enabled": true, "args": ["--permission-mode", "acceptEdits"] }
+    "codex": { "enabled": true, "model": "gpt-6.2-sol", "effort": "medium", "args": [],
+      "tiers": {
+        "review": { "effort": "high" },
+        "hard": { "model": "gpt-6.2-astra", "effort": "medium" },
+        "bulk": { "model": "gpt-6-luna", "effort": "high" },
+        "visual": { "model": "gpt-6.1-terra", "effort": "medium" }
+      } },
+    "claude": { "enabled": true, "model": "sonnet", "args": ["--permission-mode", "acceptEdits"],
+      "tiers": { "hard": { "model": "opus" }, "bulk": { "model": "haiku" } } }
   },
   "caps": { "minutes": 60, "tokens": 500000, "silentMinutes": 10 },
   "notify": {

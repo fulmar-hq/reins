@@ -94,8 +94,9 @@ cannot be read is `null`, never a guess.
 ## Configuration
 
 One file, `factory.config.json` in the private folder; see `factory.config.example.json`. It sets which tools are
-enabled and their default model and extra arguments, the caps, the timezone, how the owner and coordinator are
-reached, `notify.live` (false means dry-run: nothing is sent), and optional **extra meters**: a name, a limit, a
+enabled, their everyday model and effort, named **tiers** for other kinds of task (`hard`, `review`, `bulk`,
+`visual`; see "Choosing the model" in `COORDINATOR.md`) and extra arguments, the caps, the timezone, how the owner and coordinator are
+reached, `notify.live` (false means dry-run: nothing leaves this machine; the coordinator's wake file is still written), and optional **extra meters**: a name, a limit, a
 monthly or weekly reset, and a command that prints `{"used": n}` with optional `forecast` and `limit`. With no
 file, every installed tool is enabled and nothing is sent.
 
