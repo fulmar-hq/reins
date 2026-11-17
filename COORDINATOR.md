@@ -36,7 +36,7 @@ tier named after the job's kind is used if there is one, and otherwise the every
 | An ordinary, well-scoped ticket: a feature, a fix, a doc, a question | everyday (no flag) | The efficient model is the vendor's stated starting point for most work and scores close to the top model at a fraction of the allowance. |
 | A fresh-eyes review of a diff | `review` (automatic for `--kind review`) | Same efficient model with more thinking: finding defects rewards care more than raw capability. |
 | A change that spans several packages, a bug the everyday model already failed on once, or work where a mistake is expensive (data, money, production) | `hard` | The top model is better at making and testing changes across an existing project, and uses several times the allowance. |
-| Mechanical, high-volume work: renames, extraction, sorting, summaries of logs | `bulk` | The smallest model at a higher effort is enough when there is nothing to decide. |
+| Mechanical, high-volume work: renames, extraction, sorting, summaries of logs | `bulk` | A current efficient model at low effort. Avoid the oldest, smallest models even here: a wrong rename costs more than the allowance it saved. |
 | Reading screenshots or driving a screen | `visual` | Use the model the vendor recommends for visual understanding and computer use. |
 
 Rules that keep this cheap and honest:

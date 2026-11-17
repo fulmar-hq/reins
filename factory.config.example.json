@@ -6,7 +6,7 @@
       "tiers": {
         "review": { "effort": "high" },
         "hard": { "model": "gpt-6.2-astra", "effort": "medium" },
-        "bulk": { "model": "gpt-6-luna", "effort": "high" },
+        "bulk": { "model": "gpt-6.1-terra", "effort": "low" },
         "visual": { "model": "gpt-6.1-terra", "effort": "medium" }
       } },
     "claude": { "enabled": true, "model": "sonnet", "args": ["--permission-mode", "acceptEdits"],
