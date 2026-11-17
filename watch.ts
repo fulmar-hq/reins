@@ -1,14 +1,14 @@
 #!/usr/bin/env bun
 // One pass, run by launchd every 60 seconds. Plain code only: close jobs, read meters, notice what
 // changed, send the coordinator at most one batched message per 5 minutes, write state.json for the page.
-// The owner is never texted about progress: see textOwner in notify.ts for the only two cases.
+// Only the coordinator's ask command texts the owner.
 // bun watch.ts [--dry-run]     Sends only when the config says notify.live and --dry-run is absent.
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { enabledProviders, loadConfig, type Config } from "./config";
 import { KINDS, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, type Event, type Job, type Result, type Tokens } from "./lib";
 import { meterLine, readMeters, type Meter } from "./meters";
-import { newsHealth, recordWake, send, textOwner, unansweredMinutes, type Message } from "./notify";
+import { legacyAsks, newsHealth, recordWake, reviewAsks, send, unansweredMinutes, type Message } from "./notify";
 import { PROVIDERS } from "./providers";
 import { STAGES, byStage, readTickets, type Ticket } from "./ticket";
 
@@ -50,8 +50,11 @@ export function batch(events: Event[], cursor: Cursor, now: number): { messages:
   if (!pending.length) return { messages: [], cursor: { ...cursor, delivered: events.length } };
   if (now - cursor.lastMailAt < MAIL_GAP_MS) return { messages: [], cursor };
   const lines: string[] = [], summary = (pending.length === 1 ? pending[0]!.text : `${pending.length} changes. ${pending[0]!.text}`).slice(0, 120);
-  for (const [i, e] of pending.entries()) {
-    const line = `- ${e.text}${e.dir ? ` ${e.dir}` : ""}`, rest = `+${pending.length - i} more in events.jsonl`;
+  const askNews = pending.filter(e => e.askId), compact = askNews.map(e => e.text).join("\n").length > 500;
+  const ordered = [...askNews, ...pending.filter(e => !e.askId)];
+  for (const [i, e] of ordered.entries()) {
+    const text = compact && e.askId ? `${e.type === "owner-default" ? "Default due" : e.type === "owner-recheck" ? "Recheck ask" : "Ask dropped"} · ${e.askId} (see events.jsonl)` : e.text;
+    const line = `- ${text}${e.dir ? ` ${e.dir}` : ""}`, rest = `+${ordered.length - i} more in events.jsonl`;
     if ([...lines, line].join("\n").length > 790 - rest.length) { lines.push(rest); break; }
     lines.push(line);
   }
@@ -59,9 +62,9 @@ export function batch(events: Event[], cursor: Cursor, now: number): { messages:
   return { messages, cursor: { ...cursor, delivered: events.length, lastMailAt: now } };
 }
 
-/** state-of-play.md: "## Needs you" and "## Notes", one item per line; HTML comments are ignored. */
+/** Read "## Notes" and legacy "## Needs you", one item per line. */
 export function stateOfPlay(path: string) {
-  const out = { needsYou: [] as string[], notes: [] as string[], rewrittenAt: null as number | null };
+  const out = { notes: [] as string[], needsYou: [] as string[], rewrittenAt: null as number | null };
   if (!existsSync(path)) return out;
   out.rewrittenAt = statSync(path).mtimeMs;
   let section = "";
@@ -69,8 +72,8 @@ export function stateOfPlay(path: string) {
     const heading = raw.match(/^##\s+(.*)/)?.[1]?.trim().toLowerCase();
     if (heading) { section = heading; continue; }
     const text = raw.replace(/^\s*(?:[-*]|\d+\.)\s+/, "").trim();
-    if (text && section.startsWith("needs")) out.needsYou.push(text);
-    else if (text && section === "notes") out.notes.push(text);
+    if (text && section === "notes") out.notes.push(text);
+    if (text && section === "needs you") out.needsYou.push(text);
   }
   return out;
 }
@@ -146,46 +149,46 @@ export async function pass(o: Options = {}) {
       tokens: mine.reduce((n, j) => n + ((job?.id === j.id ? job.tokens : j.tokens)?.fresh ?? 0), 0) };
   });
 
-  // 4. Notify the coordinator: one batched message per 5 minutes.
-  const shipped = ended.filter(j => j.result === "finished"), play = stateOfPlay(f.stateOfPlay);
+  // 4. Review open asks and notify the coordinator: one batched message per 5 minutes.
+  const shipped = ended.filter(j => j.result === "finished"), play = stateOfPlay(f.stateOfPlay), ownerAsks = reviewAsks(cfg, now);
   // A lost state file must not replay old events: everything already stored counts as delivered.
   let cursor: Cursor = previous.notify ?? { delivered: stored.length, lastMailAt: 0 };
   const outbox: (Message & { at: string; outcome: string })[] = previous.outbox ?? [];
-  const next = batch(readLines<Event>(f.events), cursor, now);
+  const pending = readLines<Event>(f.events), next = batch(pending, cursor, now);
   try {
     for (const message of next.messages) {
       const outcome = await send(cfg, message, live);
       outbox.push({ ...message, at: new Date(now).toISOString(), outcome });
       if (outcome === "sent") recordWake(f.events, message.summary);
+      if (outcome === "sent" || outcome === "written") for (const e of pending.slice(cursor.delivered, next.cursor.delivered)) {
+        if (e.type === "owner-default") emit(`default-notified:${e.askId}`, "owner-default-notified",
+          "The coordinator has been told the default is due.", { askId: e.askId, quiet: true });
+      }
     }
     cursor = next.cursor;
   } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); } // nothing is marked delivered; the next pass tries again
 
-  // The one automatic owner text: the coordinator was woken, has not acted since, and work is waiting.
-  // It "acts" by running a ticket command, launching a job, taking its news (wait.ts), asking the owner, or rewriting its notes.
-  // Everything here is derived from the append-only events file, so a lost state.json cannot cause a second text.
+  // Show unanswered coordinator wakes in Health.
   const activity = readLines<Event>(f.events);
   const health = newsHealth(cfg, activity, now);
-  const ACTS = ["ticket", "ack", "owner-ask", "owner-resolved"];
+  const ACTS = ["ticket", "ack", "owner-ask", "owner-resolved", "owner-reconfirmed", "owner-default-taken"];
   const lastSeen = Math.max(play.rewrittenAt ?? 0, ...activity.filter(e => ACTS.includes(e.type)).map(e => Date.parse(e.at)), ...all.map(j => Date.parse(j.started)));
   const since = activity.filter(e => Date.parse(e.at) > lastSeen);
   const minutes = unansweredMinutes(cfg, Date.parse(since.find(e => e.type === "wake")?.at ?? ""), now);
-  const unresponsiveAlerted = since.some(e => e.type === "unresponsive"), workWaiting = tickets.some(t => ["ready", "building", "in review"].includes(t.stage));
-  const coordinatorUnresponsive = minutes !== null && workWaiting;
-  if (coordinatorUnresponsive && !unresponsiveAlerted) try {
-    const sent = await textOwner(cfg, `The coordinator chat has not responded for ${minutes} minutes and work is waiting. Please open it.`, "unresponsive", live, now);
-    activity.push(sent); outbox.push({ to: "owner", summary: sent.text, body: "", at: sent.at, outcome: sent.outcome });
-  } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
-  const resolvedAt = Math.max(0, ...activity.filter(e => e.type === "owner-resolved").map(e => Date.parse(e.at)));
-  const ownerAsks = activity.filter(e => (e.type === "owner-ask" || e.type === "unresponsive") && Date.parse(e.at) > resolvedAt).map(e => ({ at: e.at, text: e.text, held: Boolean(e.held) }));
+  const coordinatorUnresponsive = minutes !== null && tickets.some(t => ["ready", "building", "in review"].includes(t.stage));
 
   // 5. Everything the page needs.
-  const row = (j: Job & { minutesSoFar?: number }) => ({ id: j.id, name: j.name, kind: j.kind, provider: j.provider, ticket: j.ticket, started: j.started, ended: j.ended,
+  const row = (j: Job & { minutesSoFar?: number }) => ({ id: j.id, name: j.name, kind: j.kind, provider: j.provider, model: j.model, effort: j.effort, ticket: j.ticket, started: j.started, ended: j.ended,
     minutes: j.minutes ?? j.minutesSoFar ?? null, capMinutes: j.capMinutes, capTokens: j.capTokens, tokens: j.tokens, result: j.result, reason: j.reason, dir: j.dir });
+  const defaults = new Map(activity.filter(e => e.type === "owner-default" || e.type === "owner-default-taken").map(e => [e.askId, e]));
+  const notified = new Set(activity.filter(e => e.type === "owner-default-notified").map(e => e.askId));
+  const defaultNotes = [...defaults.values()].map(e => `${time.at(Date.parse(e.at))} · ${e.text}`
+    + (e.type === "owner-default" ? notified.has(e.askId) ? " · The coordinator has been told." : " · Coordinator notification pending." : ""));
   const state = {
-    at: now, timezone: cfg.timezone, sending: live ? "live" : "dry-run", needsYou: play.needsYou, notes: play.notes, stateOfPlayAt: play.rewrittenAt,
+    at: now, timezone: cfg.timezone, sending: live ? "live" : "dry-run", notes: [...play.notes, ...defaultNotes], stateOfPlayAt: play.rewrittenAt, needsYou: play.needsYou,
     running: running.map(row), tickets: ticketRows, stages: STAGES, shippedToday: shipped.map(row), stoppedToday: ended.filter(j => j.result !== "finished").map(row),
-    split: { day: today, ...split, overhead, total }, meters, metersAt, expiries, idleSince, ownerAsks, lastSeen, coordinatorUnresponsive,
+    split: { day: today, ...split, overhead, total }, meters, metersAt, expiries, idleSince, lastSeen, coordinatorUnresponsive,
+    ownerAsks: [...ownerAsks, ...legacyAsks(activity).map(e => ({ id: e.key, at: e.at, text: e.text }))],
     ...health, fileWake: cfg.notify.coordinator.channel === "file",
     notify: cursor, outbox: outbox.slice(-10), errors,
   };

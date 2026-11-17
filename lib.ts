@@ -14,7 +14,8 @@ export type Job = {
   started: string; ended: string | null; minutes: number | null; tokens: Tokens | null;
   result: Result | null; reason: string | null; dir: string; pid: number; pidStarted: string; capMinutes: number; capTokens: number;
 };
-export type Event = { key: string; at: string; type: string; text: string; dir?: string;
+export type Ask = { question: string; recommendation: string; reason: string; fallback: { at: number; action: string } | null };
+export type Event = { key: string; at: string; type: string; text: string; dir?: string; ask?: Ask; askId?: string;
   /** quiet: the coordinator's own action, recorded but never sent back to it. held: an owner text stopped by the daily limit. */
   quiet?: boolean; held?: boolean };
 

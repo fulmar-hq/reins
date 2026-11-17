@@ -55,12 +55,27 @@ Rules that keep this cheap and honest:
 
 ## When to text the owner
 
-Only for a real decision that is theirs, or a blocker you cannot fix yourself (a sign-in, a payment, an approval, a
-choice between outcomes). Never progress, never "done", never a stall you can clear. Write one or two plain
-sentences that end with exactly what you need:
+**Could I do this myself and undo it? Then do it and note it.** Ask only when the owner has a decision or
+action that is theirs to take now. Put progress and FYIs in Notes.
 
-`bun notify-owner.ts "The checkout change is ready but needs your choice: keep the old price page or replace it?"`
+```sh
+bun notify-owner.ts ask "Should the menu open on hover?" "Keep it click-only." "product taste" "2030-01-02T15:00:00Z" "keep it click-only"
+bun notify-owner.ts ask "Can you sign in again?" "Renew the existing sign-in." "sign-in or credential" --no-safe-default
+bun notify-owner.ts --reconfirm <ask-id>
+bun notify-owner.ts --resolved <ask-id> "Keep it click-only."
+```
 
-Move the ticket to `needs owner` if it is waiting on that answer. When they answer, run
-`bun notify-owner.ts --resolved`. There is a daily limit on owner texts; if yours is held, it stays on the
-page under "Needs you". If you go quiet for 30 minutes while work waits, the watcher tells the owner you are not responding.
+Give one question, your recommendation, one exact reason, and a default action with a future UTC deadline.
+The reasons are `sign-in or credential`, `spending past a limit`, `message to a real person`,
+`change to a live system for a real customer`, and `product taste`. Use `--no-safe-default` only for sign-in
+or spending when no safe default exists. Save the ID printed by the command. At most three asks can be open.
+A text held by the daily limit leaves its ask on the page. Add `--dry-run` to open an ask without sending.
+
+At the deadline the watcher closes the ask, records the default as due in Notes, and tells you to take it.
+Use `--resolved <ask-id> "What you did."` after taking the default so Notes records the action.
+After two days the watcher asks you to check the facts. Reconfirm
+by ID within a day if the answer is still needed. The watcher drops the ask if that day passes. Reconfirming
+restarts the two-day check and keeps the original default deadline. Record each answer by ID with `--resolved`.
+
+Use the `needs owner` ticket stage to track work waiting for an answer and move the ticket when you can continue.
+Only the ask command adds a question to the owner's list.

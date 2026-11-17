@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { loadConfig, type Config } from "./config";
 import { KINDS, clock, count, files, percent } from "./lib";
 import type { Meter } from "./meters";
+import { askEnded } from "./notify";
 import type { State } from "./watch";
 
 // Access: bound to loopback only, the Host header must be exactly the loopback address (so a page on
@@ -42,18 +43,28 @@ export function render(s: State, now = Date.now()): string {
     const tone = m.used >= 1 || runsOut ? "bad" : fast ? "warn" : m.verdict ? "good" : "neutral";
     const verdict = fast ? `too fast, ${m.runsOutAt !== null ? `runs out ${at(m.runsOutAt)}` : "forecast to pass the limit"}` : m.verdict ?? "pace unknown";
     const status = m.used > 1 ? "over limit" : m.used === 1 ? "at limit" : verdict;
-    return `<strong>${esc(m.label)}</strong><p>${esc(m.detail ? `${m.detail} (${percent(m.used)})` : `${percent(m.used)} used`)}</p>${chip(status, tone)}`
-      + bar(m.used, 1, tone)
+    const forecast = m.forecast;
+    const usage = bar(m.used, 1, tone);
+    const detail = m.detail && forecast == null ? `${m.detail} (${percent(m.used)})` : m.detail ?? `${percent(m.used)} used`;
+    return `<strong>${esc(m.label)}</strong><p>${esc(detail)}</p>${chip(status, tone)}`
+      + (forecast == null ? usage : `<div class="forecast-bar">${usage}<input type="range" min="0" max="1" step="any" value="${Math.max(0, Math.min(1, forecast))}" disabled aria-hidden="true"></div>`
+        + `<div class="quiet">So far ${percent(m.used)} · <span class="forecast-key" aria-hidden="true"></span> Forecast ${percent(forecast)}</div>`)
       + `<span class="quiet">resets ${esc(at(m.resetsAt!))}${m.reason ? ` · last read ${esc(at(m.observedAt!))}: ${esc(m.reason)}` : ""}</span>`;
   };
-  const running = (j: State["running"][number]) => `<strong>${esc(j.name)}</strong> <span class="quiet">${esc(j.kind)} · ${esc(j.provider)}</span>`
+  const jobInfo = (j: State["running"][number]) => [j.kind, j.provider, j.model, j.effort && `effort ${j.effort}`].filter(Boolean).map(esc).join(" · ");
+  const running = (j: State["running"][number]) => `<strong>${esc(j.name)}</strong> <span class="quiet">${jobInfo(j)}</span>`
     + `<p>${esc(j.minutes ?? 0)} of ${esc(j.capMinutes)} minutes</p>${bar(j.minutes ?? 0, j.capMinutes)}`
     + `<p>${esc(count(j.tokens?.fresh))} of ${esc(count(j.capTokens))} tokens</p>${bar(j.tokens?.fresh ?? null, j.capTokens)}`;
   const ticket = (t: State["tickets"][number]) => `<strong>${esc(t.title)}</strong>${link(t.link)}<br><span class="quiet">${esc(span(now - Date.parse(t.updated)))} in this stage`
     + `${t.running ? ` · running: ${esc(t.running)}` : ""}${t.jobs ? ` · so far ${esc(t.minutes)} min, ${esc(count(t.tokens))} tokens over ${esc(t.jobs)} job${t.jobs > 1 ? "s" : ""}` : ""}</span>`;
   const stage = (name: string) => s.tickets.filter(t => t.stage === name).sort((a, b) => name === "ready" ? a.order - b.order : Date.parse(b.updated) - Date.parse(a.updated)).slice(0, name === "shipped" ? 10 : 100);
-  const needs = [...s.ownerAsks.map(a => `${esc(a.text)} <span class="quiet">${esc(at(Date.parse(a.at)))}</span>`),
-    ...stage("needs owner").map(t => `${esc(t.title)}${link(t.link)}`), ...s.needsYou.map(esc)];
+  const deadline = new Intl.DateTimeFormat("en", { timeZone: s.timezone, dateStyle: "medium", timeStyle: "long" });
+  const needs = [...s.ownerAsks.filter(a => !("question" in a) || !askEnded(a, now)).map(a => "text" in a
+    ? `${esc(a.text)} <span class="quiet">${esc(a.id ?? "")}</span>`
+    : `<strong>${esc(a.question)}</strong><p>Recommendation: ${esc(a.recommendation)}</p>`
+    + `<p>${a.fallback ? `If no answer by ${esc(deadline.format(a.fallback.at))}, I will ${esc(a.fallback.action)}` : "No safe default exists."}</p>`
+    + `<p class="quiet">${esc(a.reason)} · asked ${span(now - Date.parse(a.at))} ago · ${esc(a.id)}</p>`
+    + (a.held ? '<p class="warn">Held, not sent to the owner (daily limit).</p>' : "")), ...(s.needsYou ?? []).map(esc)];
   const watcherLate = now - s.at > 3 * 60000;
   const sections: [string, string, string?][] = [
     ["Needs you", list(needs, "Nothing needs you."), needs.length ? "attention" : ""],
@@ -62,9 +73,10 @@ export function render(s: State, now = Date.now()): string {
       const tickets = stage(name);
       return tickets.length ? `<h3>${chip(name[0]!.toUpperCase() + name.slice(1), stageTone[name] ?? "neutral")}</h3>${list(tickets.map(ticket), "")}` : "";
     }).join("") : `<p class="quiet">No tickets yet.</p>`],
-    ["Shipped today", list(s.shippedToday.map(j => `<strong>${esc(j.name)}</strong><br><span class="quiet">${esc(j.kind)} · ${esc(j.provider)} · ${esc(Math.round(j.minutes ?? 0))} minutes · ${esc(count(j.tokens?.fresh))} tokens</span>`), "No job has finished today.")
+    ["Shipped today", list(s.shippedToday.map(j => `<strong>${esc(j.name)}</strong><br><span class="quiet">${jobInfo(j)} · ${esc(Math.round(j.minutes ?? 0))} minutes · ${esc(count(j.tokens?.fresh))} tokens</span>`), "No job has finished today.")
       + (s.stoppedToday.length ? `<h3>Stopped today</h3>${list(s.stoppedToday.map(j => `<strong>${esc(j.name)}</strong><br><span class="warn">${esc(j.reason)}</span>`), "")}` : "")
       + `<p class="quiet">Today's usage: ${[...KINDS, "overhead"].filter(k => k !== "specialist" || Number(split.specialist) > 0).map(share).map(esc).join(" / ")} (${esc(count(total))} tokens; overhead is use outside launched jobs, where the tool records it)</p>`],
+    ["Notes", list(s.notes.map(esc), "No notes yet.")],
     ["Meters", list(s.meters.map(meter), "No meter has been read yet.")],
     ["Health", list([
       health(watcherLate ? "bad" : "good", `Watcher last ran ${esc(ago(s.at))}${watcherLate ? ' <span class="bad">it should run every minute</span>' : ""}`),
@@ -145,6 +157,11 @@ p + .chip { margin-top: .375rem }
 .bar::-webkit-progress-bar { background: var(--track) }
 .bar::-webkit-progress-value { background: var(--tone); border-radius: .25rem }
 .bar::-moz-progress-bar { background: var(--tone); border-radius: .25rem }
+.forecast-bar { position: relative }
+.forecast-bar input { appearance: none; position: absolute; inset: -.125rem 0; width: 100%; margin: 0; background: transparent; opacity: 1; pointer-events: none }
+.forecast-bar input::-webkit-slider-thumb { appearance: none; width: .25rem; height: .75rem; background: var(--ink); outline: 1px solid var(--card) }
+.forecast-bar input::-moz-range-thumb { width: .25rem; height: .75rem; background: var(--ink); outline: 1px solid var(--card); border: 0; border-radius: 0 }
+.forecast-key { display: inline-block; width: .25rem; height: .65rem; background: var(--ink) }
 .health { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .5rem }
 .dot { width: .55rem; height: .55rem; margin-top: .45rem; border-radius: 50%; background: var(--tone) }
 span.warn, span.bad { color: var(--tone) }
