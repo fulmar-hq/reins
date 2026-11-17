@@ -69,7 +69,8 @@ export function render(s: State, now = Date.now()): string {
     ["Health", list([
       health(watcherLate ? "bad" : "good", `Watcher last ran ${esc(ago(s.at))}${watcherLate ? ' <span class="bad">it should run every minute</span>' : ""}`),
       health(s.coordinatorUnresponsive ? "bad" : s.lastSeen ? "good" : "warn", `Coordinator last acted ${esc(ago(s.lastSeen || null))}${s.coordinatorUnresponsive ? ' <span class="bad">wake unanswered</span>' : ""}`),
-      health(s.sending === "live" ? "good" : "warn", `Sending is <strong>${s.sending === "live" ? "live" : "dry-run (nothing is sent)"}</strong>`),
+      health(s.sending === "live" ? "good" : "warn", s.sending === "live" ? "Sending is <strong>live</strong>" : `Texts to the owner are off (dry-run).${s.fileWake === undefined ? "" : ` The coordinator wake is ${s.fileWake ? "on" : "off"}.`}`),
+      ...(s.wakeWarning ? [health("bad", `<span class="bad">${esc(s.wakeWarning)}</span>`)] : []),
       ...s.expiries.map(e => {
         const ended = e.endsAt !== null && e.endsAt <= now;
         const time = e.endsAt === null ? "has no recorded time" : `${ended ? "ended" : "ends"} ${at(e.endsAt)}`;

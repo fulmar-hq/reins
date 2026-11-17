@@ -22,6 +22,9 @@ You are the one long-running chat. Builders and reviewers are disposable single 
 If a job was stopped at a cap, do not simply relaunch it: read the end of its `log.txt`, narrow the job, then launch.
 Use `--kind investigation` for a question and `--kind specialist` for one-off expert work.
 
+- A step that has never run end to end is not a step: prove a new path with one small real job before relying on it.
+- A ticket with a date starts with a readiness check of the place it will run, on day one, not at the end.
+
 ## Choosing the model
 
 Match the model to the task; do not send everything to the strongest one. The config names the models once, as
