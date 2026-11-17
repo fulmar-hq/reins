@@ -169,7 +169,8 @@ export async function pass(o: Options = {}) {
   const lastSeen = Math.max(play.rewrittenAt ?? 0, ...stored.filter(e => ACTS.includes(e.type)).map(e => Date.parse(e.at)), ...all.map(j => Date.parse(j.started)));
   const since = stored.filter(e => Date.parse(e.at) > lastSeen), unanswered = since.find(e => e.type === "wake");
   const unresponsiveAlerted = since.some(e => e.type === "unresponsive"), workWaiting = tickets.some(t => ["ready", "building", "in review"].includes(t.stage));
-  if (unanswered && workWaiting && !unresponsiveAlerted && now - Date.parse(unanswered.at) >= cfg.notify.unansweredMinutes * 60000) try {
+  const coordinatorUnresponsive = unanswered !== undefined && workWaiting && now - Date.parse(unanswered.at) >= cfg.notify.unansweredMinutes * 60000;
+  if (coordinatorUnresponsive && !unresponsiveAlerted) try {
     const minutes = Math.round((now - Date.parse(unanswered.at)) / 60000);
     const sent = await textOwner(cfg, `The coordinator chat has not responded for ${minutes} minutes and work is waiting. Please open it.`, "unresponsive", live, now);
     stored.push(sent); outbox.push({ to: "owner", summary: sent.text, body: "", at: sent.at, outcome: sent.outcome });
@@ -183,7 +184,7 @@ export async function pass(o: Options = {}) {
   const state = {
     at: now, timezone: cfg.timezone, sending: live ? "live" : "dry-run", needsYou: play.needsYou, notes: play.notes, stateOfPlayAt: play.rewrittenAt,
     running: running.map(row), tickets: ticketRows, stages: STAGES, shippedToday: shipped.map(row), stoppedToday: ended.filter(j => j.result !== "finished").map(row),
-    split: { day: today, ...split, overhead, total }, meters, metersAt, expiries, idleSince, ownerAsks, lastSeen,
+    split: { day: today, ...split, overhead, total }, meters, metersAt, expiries, idleSince, ownerAsks, lastSeen, coordinatorUnresponsive,
     notify: cursor, outbox: outbox.slice(-10), errors,
   };
   writeFileSync(f.state + ".tmp", JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
