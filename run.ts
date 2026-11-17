@@ -52,7 +52,7 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
   // `detached` gives the job its own process group, which is what the watcher stops.
   let child;
   try {
-    child = Bun.spawn([process.env.SIMPLE_FACTORY_FAKE_HARNESS ?? argv[0]!, ...argv.slice(1)], {
+    child = Bun.spawn([process.env.REINS_FAKE_HARNESS ?? argv[0]!, ...argv.slice(1)], {
       cwd: resolve(o.cwd), detached: true, stdin: "ignore", stdout: log, stderr: log,
     });
   } finally { closeSync(log); }

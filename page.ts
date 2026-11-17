@@ -109,8 +109,8 @@ export function render(s: State, now = Date.now()): string {
     ], "")],
   ];
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="60"><title>Factory</title><link rel="stylesheet" href="/style.css"></head><body><main>
-<h1>Factory</h1>${sections.map(([title, body, style]) => `<section${style ? ` class="${style}"` : ""}><h2>${title}</h2>${body}</section>`).join("\n")}
+<meta http-equiv="refresh" content="60"><title>Reins</title><link rel="stylesheet" href="/style.css"></head><body><main>
+<h1>Reins</h1>${sections.map(([title, body, style]) => `<section${style ? ` class="${style}"` : ""}><h2>${title}</h2>${body}</section>`).join("\n")}
 </main></body></html>`;
 }
 
@@ -203,5 +203,5 @@ export function serve(cfg: Config = loadConfig(), port = cfg.page.port) {
 
 if (import.meta.main) {
   const at = process.argv.indexOf("--port"), server = serve(loadConfig(), at >= 0 ? Number(process.argv[at + 1]) : undefined);
-  console.log(`Factory page on http://127.0.0.1:${server.port}`);
+  console.log(`Reins usage page on http://127.0.0.1:${server.port}`);
 }

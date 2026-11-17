@@ -1,4 +1,4 @@
-# Contributing (people and AI agents)
+# Contributing to Reins
 
 This repository is public. Treat every commit, test, document, commit message and pull request as published.
 
@@ -8,7 +8,7 @@ This repository is public. Treat every commit, test, document, commit message an
   budgets, home-folder paths, machine names, internal addresses, tokens and keys. In code and docs use `~` or
   placeholders, and example values that are obviously made up.
 - **Nothing in the code may be specific to one user.** If it differs between users, it belongs in
-  `factory.config.json`.
+  `reins.config.json`.
 - **Keep it thin.** No model calls, no model API keys, nothing the tools already do. Plain code, small files.
 - **Tests** protect a rule whose break would cost money or hide a stall. Add one only for such a rule.
 

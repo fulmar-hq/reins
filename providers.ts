@@ -1,4 +1,4 @@
-// One small adapter per harness. The factory only starts the harness's own official command under
+// One small adapter per harness. Reins only starts the harness's own official command under
 // the user's existing sign-in, then reads what the harness itself wrote. No API keys, no model calls.
 import { spawn } from "node:child_process";
 import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -74,7 +74,7 @@ function codexLive(timeoutMs = 8000): Promise<Usage | null> {
         }
       } catch { /* not a JSON line */ }
     });
-    send({ id: 1, method: "initialize", params: { clientInfo: { name: "simple_factory_usage", version: "0.1.0" }, capabilities: null } });
+    send({ id: 1, method: "initialize", params: { clientInfo: { name: "reins_usage", version: "0.2.0" }, capabilities: null } });
   });
 }
 const codex: Provider = {

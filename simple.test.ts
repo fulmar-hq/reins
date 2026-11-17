@@ -12,8 +12,8 @@ import { addTicket, moveTicket, readTickets, ticketTimings } from "./ticket";
 import { batch, pass, stop } from "./watch";
 
 const scratch = (extra: Record<string, unknown> = {}) => {
-  const root = mkdtempSync(join(tmpdir(), "simple-factory-"));
-  return loadConfig(join(root, "factory.config.json"), { privateDir: root, timezone: "UTC", providers: { codex: { enabled: true } }, ...extra });
+  const root = mkdtempSync(join(tmpdir(), "reins-"));
+  return loadConfig(join(root, "reins.config.json"), { privateDir: root, timezone: "UTC", providers: { codex: { enabled: true } }, ...extra });
 };
 const sampleAsk = ["Can you sign in again?", "Renew the existing sign-in.", "sign-in or credential", "--no-safe-default"];
 
@@ -21,7 +21,7 @@ const sampleAsk = ["Can you sign in again?", "Renew the existing sign-in.", "sig
 test("a job over its cap is stopped and the ledger says why", async () => {
   const cfg = scratch(), root = cfg.privateDir, fake = join(root, "fake-harness"), prompt = join(root, "p.txt");
   writeFileSync(fake, "#!/bin/sh\necho started\nsleep 300\n"); chmodSync(fake, 0o755); writeFileSync(prompt, "made-up prompt");
-  Object.assign(process.env, { SIMPLE_FACTORY_FAKE_HARNESS: fake, CODEX_SESSIONS_DIR: join(root, "none") });
+  Object.assign(process.env, { REINS_FAKE_HARNESS: fake, CODEX_SESSIONS_DIR: join(root, "none") });
   const job = await launch(cfg, { kind: "build", name: "Made-up runaway", cwd: root, prompt, capMinutes: 1 });
   const running = () => Bun.spawnSync(["ps", "-o", "pid=", "-g", String(job.pid)]).stdout.toString().trim() !== "";
   expect(running()).toBe(true);
@@ -90,7 +90,7 @@ test("shipping a ticket is refused without proof", () => {
   const cfg = scratch();
   addTicket(cfg, { id: "demo", title: "Check the menu" });
   const ship = (...args: string[]) => Bun.spawnSync([process.execPath, join(import.meta.dir, "ticket.ts"), "move", "demo", "shipped", ...args], {
-    env: { ...process.env, FACTORY_PRIVATE_DIR: cfg.privateDir, SIMPLE_FACTORY_CONFIG: join(cfg.privateDir, "factory.config.json") },
+    env: { ...process.env, REINS_PRIVATE_DIR: cfg.privateDir, REINS_CONFIG: join(cfg.privateDir, "reins.config.json") },
   });
   expect(ship().exitCode).toBe(1);
   expect(ship("--proof", " ").exitCode).toBe(1);

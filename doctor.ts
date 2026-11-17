@@ -9,6 +9,7 @@ import { newsHealth, send, takeNews } from "./notify";
 import { PROVIDERS, installed } from "./providers";
 
 let broken = 0;
+console.log("Reins setup check");
 const ok = (text: string) => console.log(`  ok       ${text}`);
 const missing = (text: string) => { broken++; console.log(`  MISSING  ${text}`); };
 const note = (text: string) => console.log(`  note     ${text}`);

@@ -2,15 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Template: SETUP.md says how to fill in __BUN__, __REPO__, __PRIVATE__ and __PATH__ and where to copy it. -->
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.simple-factory.watch</string>
-  <key>ProgramArguments</key><array><string>__BUN__</string><string>__REPO__/watch.ts</string></array>
+  <key>Label</key><string>com.reins.page</string>
+  <key>ProgramArguments</key><array><string>__BUN__</string><string>__REPO__/page.ts</string></array>
   <key>WorkingDirectory</key><string>__REPO__</string>
   <key>EnvironmentVariables</key><dict>
-    <key>FACTORY_PRIVATE_DIR</key><string>__PRIVATE__</string>
+    <key>REINS_PRIVATE_DIR</key><string>__PRIVATE__</string>
     <key>PATH</key><string>__PATH__</string>
   </dict>
-  <key>StartInterval</key><integer>60</integer>
+  <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>__PRIVATE__/watch.log</string>
-  <key>StandardErrorPath</key><string>__PRIVATE__/watch.log</string>
+  <key>StandardOutPath</key><string>__PRIVATE__/page.log</string>
+  <key>StandardErrorPath</key><string>__PRIVATE__/page.log</string>
 </dict></plist>
