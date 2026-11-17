@@ -10,7 +10,7 @@ import { KINDS, appendLine, clock, count, files, isOurLeader, jobs, percent, pro
 import { meterLine, readMeters, type Meter } from "./meters";
 import { legacyAsks, newsHealth, recordWake, reviewAsks, send, unansweredMinutes, type Message } from "./notify";
 import { PROVIDERS } from "./providers";
-import { STAGES, byStage, readTickets, type Ticket } from "./ticket";
+import { STAGES, byStage, readTickets, showMinutes, ticketTimings, type Ticket } from "./ticket";
 
 export const MAIL_GAP_MS = 5 * 60000, METER_GAP_MS = 15 * 60000, STUCK_MS = 30 * 60000, OVERHEAD_SHARE = 0.15, OVERHEAD_FLOOR = 500_000;
 const minutesBetween = (from: number, to: number) => Math.round((to - from) / 6000) / 10;
@@ -138,6 +138,7 @@ export async function pass(o: Options = {}) {
     emit(`overhead:${today}`, "overhead", `Overhead is ${percent(overhead / total)} of today's usage: ${count(overhead)} of ${count(total)} tokens went to sessions that are not launched jobs.`);
   let tickets: Ticket[] = [];
   try { tickets = readTickets(cfg); } catch (error) { errors.push(`tickets.json: ${error instanceof Error ? error.message : String(error)}`); }
+  const timings = ticketTimings(tickets, all, readLines<Event>(f.events), now);
   const ready = byStage(tickets, "ready"), idleSince: number | null = !running.length && ready.length ? previous.idleSince ?? now : null;
   if (idleSince) emit(`idle:${idleSince}`, "idle", `Nothing is running and ${ready.length} ticket${ready.length > 1 ? "s are" : " is"} ready, first: ${ready[0]!.title}.`);
   const ticketRows = tickets.map(t => {
@@ -145,7 +146,10 @@ export async function pass(o: Options = {}) {
     const lastTouched = Math.max(Date.parse(t.updated), ...mine.map(j => Date.parse(j.ended ?? j.started)));
     if ((t.stage === "building" || t.stage === "in review") && !job && now - lastTouched >= STUCK_MS)
       emit(`stuck:${t.id}:${lastTouched}`, "stuck", `"${t.title}" is ${t.stage} but no job has run on it for ${Math.round((now - lastTouched) / 60000)} minutes.`);
-    return { ...t, running: job?.name ?? null, jobs: mine.length, minutes: Math.round(mine.reduce((n, j) => n + (j.minutes ?? (job?.id === j.id ? job.minutesSoFar : 0)), 0)),
+    const timing = timings.get(t.id)!;
+    if (t.stage !== "shipped" && t.stage !== "needs owner" && timing.state === "very over")
+      emit(`ticket-pace:${t.id}`, "ticket-pace", `"${t.title}" is very over: ${showMinutes(timing.elapsed!)} min elapsed, ${showMinutes(timing.predicted!)} min predicted.`);
+    return { ...t, timing, running: job?.name ?? null, jobs: mine.length, minutes: Math.round(mine.reduce((n, j) => n + (j.minutes ?? (job?.id === j.id ? job.minutesSoFar : 0)), 0)),
       tokens: mine.reduce((n, j) => n + ((job?.id === j.id ? job.tokens : j.tokens)?.fresh ?? 0), 0) };
   });
 

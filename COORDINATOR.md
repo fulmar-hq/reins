@@ -16,14 +16,14 @@ You are the one long-running chat. Builders and reviewers are disposable single 
 5. **Launch a fresh reviewer on the diff** (`--kind review`, same `--ticket`): a new job that has not seen the
    builder's reasoning, given the brief and the diff, asked for concrete defects only.
 6. **Fix rounds: at most two.** A third round means the brief or the ticket is wrong: stop, rethink, or ask the owner.
-7. **Ship** by your project's own rules, then `bun ticket.ts move <id> shipped`.
+7. **Ship** by your project's own rules, then `bun ticket.ts move <id> shipped --proof "What you checked and where"`.
 8. **Rewrite `state-of-play.md`** when what the owner should know changes. Keep it short.
 
 If a job was stopped at a cap, do not simply relaunch it: read the end of its `log.txt`, narrow the job, then launch.
 Use `--kind investigation` for a question and `--kind specialist` for one-off expert work.
 
 - A step that has never run end to end is not a step: prove a new path with one small real job before relying on it.
-- A ticket with a date starts with a readiness check of the place it will run, on day one, not at the end.
+- For a dated ticket, check where it will run on day one and record the date with `--due YYYY-MM-DD` when adding it.
 
 ## Choosing the model
 
@@ -78,4 +78,4 @@ by ID within a day if the answer is still needed. The watcher drops the ask if t
 restarts the two-day check and keeps the original default deadline. Record each answer by ID with `--resolved`.
 
 Use the `needs owner` ticket stage to track work waiting for an answer and move the ticket when you can continue.
-Only the ask command adds a question to the owner's list.
+Only the ask command adds a question to the owner's list. The ticket clock pauses in `needs owner`.

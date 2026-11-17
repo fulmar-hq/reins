@@ -8,6 +8,7 @@ import { files, jobs, pace, processStarted, readLines, withLock, type Event, typ
 import { send, takeNews, textOwner, updateAsk } from "./notify";
 import { render } from "./page";
 import { launch, plan } from "./run";
+import { addTicket, moveTicket, readTickets, ticketTimings } from "./ticket";
 import { batch, pass, stop } from "./watch";
 
 const scratch = (extra: Record<string, unknown> = {}) => {
@@ -67,6 +68,36 @@ test("pace verdict arithmetic", () => {
   // A forecast from the source replaces the straight line: ahead of the line but forecast under the limit is fine,
   expect(pace(0.56, start, reset, 3.5 * day, 0.86)).toEqual({ verdict: "on track", runsOutAt: null });
   expect(pace(0.4, start, reset, 3.5 * day, 1.2).verdict).toBe("too fast"); // and behind the line but forecast over is not.
+});
+
+test("ticket pace boundaries exclude time in needs owner", () => {
+  const cfg = scratch(), f = files(cfg), start = Date.parse("2030-01-01T12:00:00Z"), minute = 60000;
+  addTicket(cfg, { id: "demo", title: "Check the menu", estimate: 10 }, undefined, start);
+  const job = { ticket: "demo", started: new Date(start).toISOString() } as Job;
+  moveTicket(cfg, "demo", "needs owner", undefined, start + 2 * minute);
+  moveTicket(cfg, "demo", "building", undefined, start + 8 * minute);
+  const timing = (minutes: number) => ticketTimings(readTickets(cfg), [job], readLines<Event>(f.events), start + minutes * minute).get("demo");
+  expect(ticketTimings(readTickets(cfg), [], readLines<Event>(f.events), start + 7 * minute).get("demo"))
+    .toEqual({ elapsed: null, predicted: 10, state: null });
+  expect(timing(7)).toMatchObject({ elapsed: 2, state: "on track" });
+  expect(timing(16)).toMatchObject({ elapsed: 10, state: "on track" });
+  expect(timing(16.01)).toMatchObject({ state: "a little over" });
+  expect(timing(21)).toMatchObject({ elapsed: 15, state: "a little over" });
+  expect(timing(21.01)).toMatchObject({ state: "very over" });
+});
+
+test("shipping a ticket is refused without proof", () => {
+  const cfg = scratch();
+  addTicket(cfg, { id: "demo", title: "Check the menu" });
+  const ship = (...args: string[]) => Bun.spawnSync([process.execPath, join(import.meta.dir, "ticket.ts"), "move", "demo", "shipped", ...args], {
+    env: { ...process.env, FACTORY_PRIVATE_DIR: cfg.privateDir, SIMPLE_FACTORY_CONFIG: join(cfg.privateDir, "factory.config.json") },
+  });
+  expect(ship().exitCode).toBe(1);
+  expect(ship("--proof", " ").exitCode).toBe(1);
+  expect(readTickets(cfg)[0]?.stage).toBe("ready");
+  expect(ship("--proof", "Opened the menu on the test page.").exitCode).toBe(0);
+  const shipped = readTickets(cfg)[0]!;
+  expect(shipped.shipment?.proof).toBe("Opened the menu on the test page.");
 });
 
 // Rule: stopping a job must never signal a process that is not provably that job.

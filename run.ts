@@ -2,13 +2,12 @@
 // Start one disposable job with the harness's own command, detached, and return at once. The watcher closes it.
 // bun run.ts --kind build|review|investigation|specialist --name "plain words" --cwd <dir> --prompt <file>
 //   [--provider codex|claude] [--ticket id] [--cap-tokens n] [--cap-minutes n] [--tier name] [--model m] [--effort e] [--dir <run folder>] [--print]
-import { spawn } from "node:child_process";
-import { constants, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, constants, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { enabledProviders, loadConfig, type Config, type ProviderName } from "./config";
-import { KINDS, appendLine, files, processStarted, type Job, type Kind } from "./lib";
+import { KINDS, appendLine, files, processStarted, withLock, type Job, type Kind } from "./lib";
 import { PROVIDERS } from "./providers";
-import { moveTicket, readTickets } from "./ticket";
+import { moveTicketLocked, readTickets } from "./ticket";
 
 export type Launch = {
   kind: Kind; name: string; cwd: string; prompt: string; provider?: ProviderName; ticket?: string; capTokens?: number; capMinutes?: number;
@@ -31,6 +30,13 @@ export function plan(cfg: Config, o: Launch, dir = "<run folder>") {
 }
 export async function launch(cfg: Config, o: Launch): Promise<Job> {
   plan(cfg, o); // refuse a bad request before creating anything
+  const stage = o.kind === "build" ? "building" : o.kind === "review" ? "in review" : null;
+  return o.ticket && stage
+    ? withLock(files(cfg).lock, () => startJob(cfg, o, stage))
+    : startJob(cfg, o, null);
+}
+
+function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null): Job {
   const f = files(cfg), now = new Date(o.now ?? Date.now());
   if (o.ticket && !readTickets(cfg).some(t => t.id === o.ticket)) throw Error(`There is no ticket ${o.ticket}; add it with ticket.ts first.`);
   const stamp = now.toISOString().replace(/[-:]/g, "").slice(0, 15), day = stamp.slice(0, 8), time = stamp.slice(9);
@@ -44,19 +50,21 @@ export async function launch(cfg: Config, o: Launch): Promise<Job> {
   copyFileSync(o.prompt, prompt, constants.COPYFILE_EXCL);
   const { provider, argv, model, effort } = plan(cfg, { ...o, prompt }, dir), log = openSync(join(dir, "log.txt"), "ax");
   // `detached` gives the job its own process group, which is what the watcher stops.
-  const child = spawn(process.env.SIMPLE_FACTORY_FAKE_HARNESS ?? argv[0]!, argv.slice(1), { cwd: resolve(o.cwd), detached: true, stdio: ["ignore", log, log] });
-  await new Promise<void>((ok, fail) => { child.once("spawn", () => ok()); child.once("error", fail); });
+  let child;
+  try {
+    child = Bun.spawn([process.env.SIMPLE_FACTORY_FAKE_HARNESS ?? argv[0]!, ...argv.slice(1)], {
+      cwd: resolve(o.cwd), detached: true, stdin: "ignore", stdout: log, stderr: log,
+    });
+  } finally { closeSync(log); }
   child.unref();
   const job: Job = {
     event: "started", id: `${day}-${time}-${slug}`, name: o.name.trim(), kind: o.kind, provider, model, effort, ticket: o.ticket ?? null,
-    started: now.toISOString(), ended: null, minutes: null, tokens: null, result: null, reason: null, dir, pid: child.pid!, pidStarted: processStarted(child.pid!),
+    started: now.toISOString(), ended: null, minutes: null, tokens: null, result: null, reason: null, dir, pid: child.pid, pidStarted: processStarted(child.pid),
     capMinutes: o.capMinutes ?? cfg.caps.minutes, capTokens: o.capTokens ?? cfg.caps.tokens,
   };
   writeFileSync(join(dir, "job.json"), JSON.stringify(job, null, 2) + "\n", { mode: 0o600, flag: "wx" });
   appendLine(f.ledger, job);
-  // A builder puts its ticket in "building" and a reviewer in "in review"; other kinds leave the stage alone.
-  const stage = o.kind === "build" ? "building" : o.kind === "review" ? "in review" : null;
-  if (o.ticket && stage) moveTicket(cfg, o.ticket, stage, "launcher", now.getTime());
+  if (o.ticket && stage) moveTicketLocked(cfg, o.ticket, stage, "launcher", now.getTime());
   return job;
 }
 
