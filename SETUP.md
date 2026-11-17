@@ -18,7 +18,9 @@ if this is not a Mac.
    (d) Any extra meter they want (for example a cloud bill): a name, a limit, monthly or weekly, and a command
    that prints `{"used": n}`. Optional; skip unless they ask.
 3. **Write the config** at `~/.simple-factory/factory.config.json`, starting from `factory.config.example.json`
-   and keeping only what applies. Leave `"live": false` for now. Copy `state-of-play.template.md` to
+   and keeping only what applies. Set each tool's everyday model and its tiers from what that tool offers today
+   (its `/model` list and the vendor's "which model" page), not from the example's names, which will age; see
+   "Choosing the model" in `COORDINATOR.md`. Leave `"live": false` for now. Copy `state-of-play.template.md` to
    `~/.simple-factory/state-of-play.md`.
 4. **Claude usage meter only:** ask the owner to run `claude` once in this folder and accept the
    "do you trust this folder" question themselves.

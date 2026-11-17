@@ -6,7 +6,7 @@ import { loadConfig } from "./config";
 import { spawn } from "node:child_process";
 import { files, jobs, pace, processStarted, readLines, withLock, type Event, type Job } from "./lib";
 import { send, takeNews, textOwner } from "./notify";
-import { launch } from "./run";
+import { launch, plan } from "./run";
 import { batch, pass, stop } from "./watch";
 
 const scratch = (extra: Record<string, unknown> = {}) => {
@@ -129,4 +129,14 @@ test("coordinator news is handed over once and never lost", async () => {
   expect(() => takeNews(cfg, () => { throw Error("made-up crash while writing"); })).toThrow(); // a crash before the output is written
   expect(take()).toBe(true); expect(got[2]).toMatch(/fourth/); // loses nothing: the next wait still gets it
   expect(readLines<Event>(files(cfg).events).filter(e => e.type === "ack")).toHaveLength(3); // only real hand-overs acknowledge
+});
+
+// Rule: the costly model is used only when the coordinator asks for it; every other job gets the everyday one.
+test("a job gets the everyday model unless a tier is asked for", () => {
+  const cfg = scratch({ providers: { codex: { enabled: true, model: "everyday", effort: "medium", tiers: { hard: { model: "top" }, review: { effort: "high" } } } } });
+  const base = { name: "x", cwd: tmpdir(), prompt: import.meta.path };
+  expect(plan(cfg, { ...base, kind: "build" })).toMatchObject({ model: "everyday", effort: "medium" });
+  expect(plan(cfg, { ...base, kind: "review" })).toMatchObject({ model: "everyday", effort: "high" });
+  expect(plan(cfg, { ...base, kind: "build", tier: "hard" })).toMatchObject({ model: "top", effort: "medium" });
+  expect(() => plan(cfg, { ...base, kind: "build", tier: "nope" })).toThrow("no tier");
 });

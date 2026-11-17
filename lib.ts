@@ -10,7 +10,7 @@ export type Result = "finished" | "stopped-cap" | "stopped-silent" | "failed" | 
 /** Real counts only, null when not knowable. `fresh` = input - cached + output, the part that is not a cache re-read. */
 export type Tokens = { input: number | null; cached: number | null; output: number | null; fresh: number | null };
 export type Job = {
-  event: "started" | "ended"; id: string; name: string; kind: Kind; provider: ProviderName; ticket: string | null;
+  event: "started" | "ended"; id: string; name: string; kind: Kind; provider: ProviderName; model?: string | null; effort?: string | null; ticket: string | null;
   started: string; ended: string | null; minutes: number | null; tokens: Tokens | null;
   result: Result | null; reason: string | null; dir: string; pid: number; pidStarted: string; capMinutes: number; capTokens: number;
 };

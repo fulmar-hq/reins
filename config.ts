@@ -5,7 +5,10 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 export type ProviderName = "codex" | "claude";
-export type ProviderConfig = { enabled: boolean; model?: string; effort?: string; args?: string[]; trustedDir?: string };
+/** `model` and `effort` are the everyday choice. `tiers` are named alternatives for other kinds of task ("hard", "review", "bulk"...):
+ *  `run.ts --tier hard` picks one, and a tier named after a job kind is used for that kind when no tier is given. */
+export type Tier = { model?: string; effort?: string };
+export type ProviderConfig = { enabled: boolean; model?: string; effort?: string; tiers?: Record<string, Tier>; args?: string[]; trustedDir?: string };
 export type Channel =
   | { channel: "none" }
   | { channel: "file"; file?: string }                // appended to; `bun wait.ts` returns when it grows
