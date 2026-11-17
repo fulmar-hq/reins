@@ -1,0 +1,25 @@
+{
+  "timezone": "America/Toronto",
+  "defaultProvider": "codex",
+  "providers": {
+    "codex": { "enabled": true, "model": "gpt-6.1-sol", "effort": "high", "args": [] },
+    "claude": { "enabled": true, "args": ["--permission-mode", "acceptEdits"] }
+  },
+  "caps": { "minutes": 60, "tokens": 500000, "silentMinutes": 10 },
+  "notify": {
+    "live": false,
+    "owner": { "channel": "telegram", "credentialsFile": "~/.simple-factory/telegram.json" },
+    "coordinator": { "channel": "file" },
+    "unansweredMinutes": 30,
+    "ownerMaxPerDay": 4
+  },
+  "extraMeters": [
+    { "name": "Cloud bill this month", "unit": "$", "limit": 100, "reset": "monthly", "everyHours": 4,
+      "command": ["~/.simple-factory/read-cloud-bill.sh"] }
+  ],
+  "expiries": [
+    { "name": "Cloud sign-in on this Mac", "recordFile": "~/.simple-factory/cloud-signin-at", "hours": 24 }
+  ],
+  "page": { "port": 4319 },
+  "privacyTermsFile": "~/.simple-factory/private-words.txt"
+}
