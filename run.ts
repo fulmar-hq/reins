@@ -3,12 +3,14 @@
 // bun run.ts --kind build|review|fix|investigation|specialist --name "plain words" --cwd <dir> --prompt <file>
 //   [--provider codex|claude] [--ticket id] [--retry-of <job id or run folder name>]
 //   [--cap-tokens n] [--cap-minutes n] [--tier name] [--model m] [--effort e] [--dir <run folder>] [--print]
+// bun run.ts stop <job-id> --reason redirected
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { enabledProviders, loadConfig, type Config, type ProviderName } from "./config";
 import { EXIT_NOTE, KINDS, appendLine, files, jobs, processStarted, purposeForKind, withLock, type Job, type Kind } from "./lib";
 import { PROVIDERS } from "./providers";
 import { moveTicketLocked, readTickets } from "./ticket";
+import { stopRedirected } from "./watch";
 
 export type Launch = {
   kind: Kind; name: string; cwd: string; prompt: string; provider?: ProviderName; ticket?: string; capTokens?: number; capMinutes?: number;
@@ -103,7 +105,15 @@ if (import.meta.main && process.argv[2] === "--record-exit") {
   const args = process.argv.slice(2), value = (flag: string) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
   const number = (flag: string) => { const v = value(flag); if (v === undefined) return; const n = Number(v); if (!Number.isFinite(n) || n <= 0) throw Error(`${flag} needs a positive number`); return n; };
   try {
-    const cfg = loadConfig(), request: Launch = {
+    const cfg = loadConfig();
+    if (args[0] === "stop") {
+      if (args.length !== 4 || args[2] !== "--reason" || args[3] !== "redirected")
+        throw Error("Use run.ts stop <job-id> --reason redirected.");
+      stopRedirected(cfg, args[1]!);
+      console.log("Stopped the redirected job.");
+      process.exit(0);
+    }
+    const request: Launch = {
       kind: value("--kind") as Kind, name: value("--name") ?? "", cwd: value("--cwd") ?? "", prompt: value("--prompt") ?? "", provider: value("--provider") as ProviderName | undefined,
       ticket: value("--ticket"), retryOf: args.includes("--retry-of") ? value("--retry-of") ?? "" : undefined,
       capTokens: number("--cap-tokens"), capMinutes: number("--cap-minutes"), tier: value("--tier"), model: value("--model"), effort: value("--effort"), dir: value("--dir"),

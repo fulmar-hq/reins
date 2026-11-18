@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { enabledProviders, loadConfig, type Config } from "./config";
-import { EXIT_NOTE, KINDS, NO_RESULT, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, slice, ticketAttempts, type Event, type Job, type Outcome, type Result, type Tokens } from "./lib";
+import { EXIT_NOTE, KINDS, NO_RESULT, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, slice, ticketAttempts, withLock, type Event, type Job, type Outcome, type Result, type Tokens } from "./lib";
 import { meterLine, readBacklog, readMeters, type Meter } from "./meters";
 import { legacyAsks, newsHealth, recordWake, reviewAsks, send, unansweredMinutes, type Message } from "./notify";
 import { PROVIDERS } from "./providers";
@@ -59,9 +59,34 @@ function signal(job: Job, name: "SIGTERM" | "SIGKILL"): boolean {
 }
 /** Stop a job. Once its leader is gone nothing more is signalled: any children it left are left alone. */
 export function stop(job: Job) {
-  if (!signal(job, "SIGTERM")) return;
+  if (!signal(job, "SIGTERM")) return false;
   for (let i = 0; i < 30 && alive(job); i++) Bun.sleepSync(100);
   signal(job, "SIGKILL");
+  return true;
+}
+
+type JobEnd = Pick<Job, "result" | "outcome" | "reason" | "reasonKind">;
+function recordEnd(cfg: Config, job: Job, verdict: JobEnd, now: number) {
+  const started = Date.parse(job.started);
+  const tokens = PROVIDERS[job.provider].facts(job.dir, started).tokens;
+  const achieved = verdict.outcome === "finished" ? achievedResult(job.dir) : null;
+  const ended: Job = { ...job, event: "ended", ended: new Date(now).toISOString(), minutes: minutesBetween(started, now), tokens, ...verdict, achieved };
+  const f = files(cfg);
+  appendLine(f.ledger, ended);
+  const used = `${ended.minutes} min, ${count(tokens?.fresh)} tokens`;
+  const summary = verdict.outcome === "failed" ? "Failed" : "Stopped";
+  const text = verdict.outcome === "finished" ? `Finished: ${job.name} (${used}).` : `${summary}: ${job.name}, ${verdict.reason} (${used}).`;
+  appendLine(f.events, { key: `job:${job.id}`, at: ended.ended!, type: ended.result!, text, dir: job.dir,
+    ...(verdict.reasonKind === "redirected" ? { quiet: true } : {}) } satisfies Event);
+}
+
+export function stopRedirected(cfg: Config, id: string, now = Date.now()) {
+  const f = files(cfg);
+  withLock(f.lock, () => {
+    const job = jobs(f.ledger).find(j => j.id === id);
+    if (!job || job.event !== "started" || !stop(job)) throw Error("There is no running job with that ID.");
+    recordEnd(cfg, job, { result: "stopped", outcome: "stopped", reason: "the coordinator redirected the work", reasonKind: "redirected" }, now);
+  });
 }
 
 export type Cursor = { delivered: number; lastMailAt: number };
@@ -100,6 +125,7 @@ export function stateOfPlay(path: string) {
 }
 
 export type Options = { cfg?: Config; now?: number; live?: boolean; meters?: (cfg: Config, previous: Meter[], now: number) => Promise<Meter[]> };
+type MeterAlarm = { used: number; resetsAt: number | null; forecastAlarm: boolean };
 export async function pass(o: Options = {}) {
   const cfg = o.cfg ?? loadConfig(), f = files(cfg), now = o.now ?? Date.now(), live = o.live ?? false, time = clock(cfg.timezone);
   mkdirSync(cfg.privateDir, { recursive: true });
@@ -114,19 +140,16 @@ export async function pass(o: Options = {}) {
 
   // 1. Jobs: finished, silent or over cap.
   const running: (Job & { minutesSoFar: number })[] = [];
-  for (const job of jobs(f.ledger).filter(j => j.event === "started")) {
+  for (const candidate of jobs(f.ledger).filter(j => j.event === "started")) withLock(f.lock, () => {
+    const job = jobs(f.ledger).find(j => j.id === candidate.id);
+    if (job?.event !== "started") return;
     const provider = PROVIDERS[job.provider], started = Date.parse(job.started), facts = provider.facts(job.dir, started);
     const finishedAt = provider.finished(job.dir) ? statSync(join(job.dir, "result.txt")).mtimeMs : 0;
     const verdict = judge(job, { alive: alive(job), pidInUse: processStarted(job.pid) !== "", finishedAt, exit: harnessExit(job.dir), ...facts }, now, cfg.caps.silentMinutes);
-    if (!verdict) { running.push({ ...job, tokens: facts.tokens, minutesSoFar: minutesBetween(started, now) }); continue; }
+    if (!verdict) { running.push({ ...job, tokens: facts.tokens, minutesSoFar: minutesBetween(started, now) }); return; }
     stop(job);
-    const tokens = provider.facts(job.dir, started).tokens, minutes = minutesBetween(started, now);
-    const achieved = verdict.outcome === "finished" ? achievedResult(job.dir) : null;
-    appendLine(f.ledger, { ...job, event: "ended", ended: new Date(now).toISOString(), minutes, tokens, ...verdict, achieved } satisfies Job);
-    const used = `${minutes} min, ${count(tokens?.fresh)} tokens`;
-    const summary = verdict.outcome === "failed" ? "Failed" : "Stopped";
-    emit(`job:${job.id}`, verdict.result, verdict.outcome === "finished" ? `Finished: ${job.name} (${used}).` : `${summary}: ${job.name}, ${verdict.reason} (${used}).`, { dir: job.dir });
-  }
+    recordEnd(cfg, job, verdict, now);
+  });
 
   // 2. Meters, refreshed every 15 minutes; between refreshes the last reading stands.
   let meters: Meter[] = previous.meters ?? [], metersAt: number = previous.metersAt ?? 0;
@@ -134,11 +157,28 @@ export async function pass(o: Options = {}) {
   const backlogRead = readBacklog(cfg.backlog, previous.backlog, now);
   if (refresh) try { meters = await (o.meters ?? readMeters)(cfg, meters, now); metersAt = now; } catch (error) { errors.push(`meters: ${String(error)}`); }
   const backlog = await backlogRead;
+  const meterAlarms = new Map(Object.entries<MeterAlarm>(previous.meterAlarms ?? {}));
+  // Older snapshots already have the last usage reading and the old forecast event key.
+  if (!previous.meterAlarms) for (const old of (previous.meters ?? []) as Meter[]) {
+    if (old.used !== null) meterAlarms.set(old.id, {
+      used: old.used, resetsAt: old.resetsAt, forecastAlarm: seen.has(`pace:${old.id}:${old.resetsAt}`),
+    });
+  }
   for (const m of meters) {
     if (m.used === null || m.reason) continue; // only a fresh real reading can raise an event
-    const crossed = [1, 0.8, 0.5].find(t => m.used! >= t);
-    if (crossed) emit(`meter:${m.id}:${m.resetsAt}:${crossed}`, "meter", `${m.label} passed ${percent(crossed)}. ${meterLine(m, time.at)}.`);
-    if (m.verdict === "too fast") emit(`pace:${m.id}:${m.resetsAt}`, "too-fast", `${meterLine(m, time.at)}, before it resets ${time.at(m.resetsAt!)}.`);
+    const old = meterAlarms.get(m.id), observed = m.observedAt ?? m.checkedAt;
+    const crossed = [1, 0.8, 0.5].find(t => (old?.used ?? 0) < t && m.used! >= t);
+    if (crossed) emit(`meter-crossing:${m.id}:${crossed}:${observed}`, "meter", `${m.label} passed ${percent(crossed)}. ${meterLine(m, time.at)}.`);
+    const reset = old?.resetsAt != null && m.resetsAt != null && observed >= old.resetsAt
+      && m.resetsAt > old.resetsAt && m.used < old.used;
+    // Forecast changes alone never rearm this warning. A new window or recovery from the actual cap can.
+    const recovered = (old?.used ?? 0) >= 1 && m.used < 1;
+    let forecastAlarm = !!old?.forecastAlarm && !reset && !recovered;
+    if (!forecastAlarm && m.verdict === "too fast") {
+      emit(`pace-crossing:${m.id}:${observed}`, "too-fast", `${meterLine(m, time.at)}, before it resets ${time.at(m.resetsAt!)}.`);
+      forecastAlarm = true;
+    }
+    meterAlarms.set(m.id, { used: m.used, resetsAt: m.resetsAt, forecastAlarm });
   }
   const expiries = cfg.expiries.map(e => {
     let made = NaN;
@@ -164,6 +204,7 @@ export async function pass(o: Options = {}) {
   let tickets: Ticket[] = [];
   try { tickets = readTickets(cfg); } catch (error) { errors.push(`tickets.json: ${error instanceof Error ? error.message : String(error)}`); }
   const timings = ticketTimings(tickets, all, readLines<Event>(f.events), now);
+  const pausedSince: number | null = running.length ? null : previous.pausedSince ?? previous.idleSince ?? now;
   const ready = byStage(tickets, "ready"), idleSince: number | null = !running.length && ready.length ? previous.idleSince ?? now : null;
   if (idleSince) emit(`idle:${idleSince}`, "idle", `Nothing is running and ${ready.length} ticket${ready.length > 1 ? "s are" : " is"} ready, first: ${ready[0]!.title}.`);
   const ticketRows = tickets.map(t => {
@@ -216,7 +257,8 @@ export async function pass(o: Options = {}) {
   const state = {
     at: now, timezone: cfg.timezone, sending: live ? "live" : "dry-run", notes: [...play.notes, ...defaultNotes], stateOfPlayAt: play.rewrittenAt, needsYou: play.needsYou,
     running: running.map(row), tickets: ticketRows, stages: STAGES, shippedToday: shipped.map(row), stoppedToday: ended.filter(j => j.result !== "finished").map(row),
-    split: { day: today, ...split, overhead, total }, meters, metersAt, backlog, expiries, idleSince, lastSeen, coordinatorUnresponsive,
+    split: { day: today, ...split, overhead, total }, meters, metersAt, meterAlarms: Object.fromEntries(meterAlarms),
+    backlog, expiries, idleSince, pausedSince, lastSeen, coordinatorUnresponsive,
     ownerAsks: [...ownerAsks, ...legacyAsks(activity).map(e => ({ id: e.key, at: e.at, text: e.text }))],
     ...health, fileWake: cfg.notify.coordinator.channel === "file",
     notify: cursor, outbox: outbox.slice(-10), errors,

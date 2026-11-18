@@ -138,6 +138,26 @@ test("a burst of events becomes one wake", () => {
   expect(many.messages[0]!.body).toContain("more in events.jsonl");
 });
 
+test("meter alarms rearm on usage recovery and ignore forecast swings", async () => {
+  const cfg = scratch({ providers: {} }), start = Date.parse("2030-01-01T00:00:00Z");
+  const gap = 15 * 60000, reset = start + 86400000;
+  let now = start + 12 * 3600000;
+  const check = async (used: number, forecast: number, unavailable = false) => {
+    const sample = reading("example", "Example meter", used, start, reset + (now % (3 * gap)), now, null, forecast);
+    await pass({ cfg, now, meters: async () => unavailable ? [] : [sample] });
+    now += gap;
+    return readLines<Event>(files(cfg).events).filter(e => e.type === "meter" || e.type === "too-fast").map(e => e.type);
+  };
+  expect(await check(0.49, 0.9)).toEqual([]);
+  expect(await check(0.5, 1.1)).toEqual(["meter", "too-fast"]);
+  expect(await check(0.5, 0.9)).toEqual(["meter", "too-fast"]);
+  expect(await check(0.2, 0.9, true)).toEqual(["meter", "too-fast"]);
+  expect(await check(0.51, 1.2)).toEqual(["meter", "too-fast"]);
+  expect(await check(0.5, 1.3)).toEqual(["meter", "too-fast"]);
+  await check(0.49, 0.9);
+  expect(await check(0.51, 1.1)).toEqual(["meter", "too-fast", "meter"]);
+});
+
 // Rule: the pace verdict is what warns the owner that a limit will run out early; its arithmetic must hold.
 test("pace verdict arithmetic", async () => {
   const day = 86400000, start = 0, reset = 7 * day;
@@ -226,6 +246,37 @@ test("shipping a ticket is refused without proof", () => {
   expect(ship("--proof", "Opened the menu on the test page.").exitCode).toBe(0);
   const shipped = readTickets(cfg)[0]!;
   expect(shipped.shipment?.proof).toBe("Opened the menu on the test page.");
+});
+
+test("setting an older ticket can add an estimate, set or clear a due date, and rename it", () => {
+  const cfg = scratch({ providers: {} }), root = cfg.privateDir;
+  const minute = 60000, start = Date.now() - 20 * minute;
+  addTicket(cfg, { id: "older", title: "Sketch a map", stage: "building" }, "test", start);
+  addTicket(cfg, { id: "source", title: "Trace the path" });
+  // Older stage changes identified the ticket by title alone.
+  const events = files(cfg).events;
+  writeFileSync(events, "");
+  const stage = (minutes: number, text: string) => appendLine(events, {
+    key: `legacy:${minutes}`, type: "ticket", at: new Date(start + minutes * minute).toISOString(), text: `test ${text}`,
+  } satisfies Event);
+  stage(5, 'moved "Sketch a map" from building to needs owner');
+  stage(15, 'moved "Sketch a map" from needs owner to building');
+  const config = join(root, "reins.config.json");
+  writeFileSync(config, '{"providers":{}}');
+  assertPrivateDir(root, loadConfig(config).privateDir);
+  const set = (...args: string[]) => Bun.spawnSync([process.execPath, "--no-env-file", join(import.meta.dir, "ticket.ts"),
+    "set", "older", ...args], { cwd: root, env: { ...process.env, REINS_CONFIG: config } }).exitCode;
+  expect(set("--estimate", "0", "--title", "Unused title")).toBe(1);
+  expect(set("--due", "2030-02-30")).toBe(1);
+  expect(readTickets(cfg)[0]?.title).toBe("Sketch a map");
+  expect(set("--estimate", "25", "--due", "2030-02-28", "--title", "Draw a map", "--waiting-on", "source")).toBe(0);
+  expect(readTickets(cfg)[0]).toMatchObject({ title: "Draw a map", estimate: 25, due: "2030-02-28", waitingOn: "source" });
+  const job = { ticket: "older", started: new Date(start).toISOString() } as Job;
+  expect(ticketTimings(readTickets(cfg), [job], readLines<Event>(events), start + 20 * minute).get("older"))
+    .toEqual({ elapsed: 10, predicted: 25, state: "on track" });
+  expect(set("--due", "none")).toBe(0);
+  expect(readTickets(cfg)[0]?.due).toBeUndefined();
+  expect(readTickets(cfg)[0]?.estimate).toBe(25);
 });
 
 // Rule: stopping a job must never signal a process that is not provably that job.
@@ -362,6 +413,17 @@ test("Needs you is absent with no open asks", async () => {
   expect(render(state, now)).not.toContain("Needs you");
 });
 
+test("the header uses the pause icon and elapsed time until jobs run", async () => {
+  const cfg = scratch({ providers: {} }), start = Date.parse("2030-01-01T10:00:00Z");
+  const watch = (now: number) => pass({ cfg, now, meters: async () => [] });
+  await watch(start);
+  const now = start + 17 * 60000, state = await watch(now);
+  const header = (html: string) => html.match(/<header>.*?<\/header>/)?.[0];
+  expect(header(render(state, now))).toMatch(/class="activity paused"><svg.*?Paused for <\/span>17 min/);
+  const running = { ticket: null, started: new Date(now).toISOString(), name: "Check a model", capMinutes: 30 } as State["running"][number];
+  expect(header(render({ ...state, running: [running, running] }, now))).toContain("2 jobs running");
+});
+
 test("a ticket due within 3 days appears as an at-risk row even when not started", async () => {
   const cfg = scratch(), now = Date.parse("2030-01-01T10:00:00Z");
   addTicket(cfg, { id: "source", title: "Collect feedback" }, "test", now);
@@ -379,7 +441,7 @@ test("a ticket due within 3 days appears as an at-risk row even when not started
   expect(html).toContain("Not started · 2");
 });
 
-test("failed in a row skips unknown verdicts and resets only after DONE", async () => {
+test("failed in a row skips redirects and unknown verdicts and resets only after DONE", async () => {
   const cfg = scratch(), now = Date.parse("2030-01-01T10:00:00Z");
   addTicket(cfg, { id: "demo", title: "Check the index", stage: "building" }, "test", now - 60000);
   const state = await pass({ cfg, now, meters: async () => [] });
@@ -393,6 +455,24 @@ test("failed in a row skips unknown verdicts and resets only after DONE", async 
   expect(failures([older, oldRow, notDone, stopped, capped, active])).toBe("5");
   expect(failures([older, oldRow, notDone, stopped, capped, attempt(6, "finished", true), active])).toBe("");
   expect(failures([notDone, attempt(4, "finished", null), attempt(5, "finished"), capped])).toBe("2");
+
+  const processToStop = Bun.spawn(["sleep", "30"], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  try {
+    const config = join(cfg.privateDir, "reins.config.json");
+    writeFileSync(config, '{"providers":{}}');
+    assertPrivateDir(cfg.privateDir, loadConfig(config).privateDir);
+    appendLine(files(cfg).ledger, { ...active, provider: "codex", dir: cfg.privateDir,
+      pid: processToStop.pid, pidStarted: processStarted(processToStop.pid) });
+    const result = Bun.spawnSync([process.execPath, "--no-env-file", join(import.meta.dir, "run.ts"),
+      "stop", active.id, "--reason", "redirected"], { env: { ...process.env, REINS_CONFIG: config } });
+    expect(result.exitCode).toBe(0);
+    expect(await processToStop.exited).toBeDefined();
+    const [redirected] = jobs(files(cfg).ledger);
+    expect(redirected).toMatchObject({ outcome: "stopped", reasonKind: "redirected" });
+    expect(failures([older, notDone, capped, redirected!])).toBe("3");
+  } finally {
+    if (processToStop.exitCode === null && processToStop.signalCode === null) processToStop.kill();
+  }
 });
 
 test("the week starts at Monday midnight in the configured timezone", async () => {
