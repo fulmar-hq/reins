@@ -10,7 +10,7 @@ import { reading } from "./meters";
 import { render } from "./page";
 import { launch, plan } from "./run";
 import { addTicket, moveTicket, readTickets, ticketTimings } from "./ticket";
-import { batch, pass, stop } from "./watch";
+import { batch, pass, stop, type State } from "./watch";
 
 function assertPrivateDir(root: string, privateDir: string) {
   const local = relative(root, privateDir);
@@ -47,9 +47,54 @@ test("a config loaded from another folder never touches the folder named by the 
   }
 });
 
+test("the privacy check scans author and committer identities throughout the commit range", () => {
+  const { privateDir: root } = scratch();
+  const config = join(root, "reins.config.json"), terms = join(root, "terms.txt");
+  const privateWord = "Widgetmaker";
+  writeFileSync(terms, privateWord);
+  writeFileSync(config, JSON.stringify({ privacyTermsFile: terms }));
+  assertPrivateDir(root, loadConfig(config).privateDir);
+  const email = (host: string) => `git@${host}`;
+  const git = (args: string[], identity = {}) => {
+    const result = Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", ...args], { cwd: root, env: {
+      ...process.env, GIT_AUTHOR_NAME: "Example Author", GIT_AUTHOR_EMAIL: email("example.com"),
+      GIT_COMMITTER_NAME: "Example Committer", GIT_COMMITTER_EMAIL: email("example.com"), ...identity,
+    } });
+    expect(result.exitCode).toBe(0);
+    return result.stdout.toString().trim();
+  };
+  const commit = (identity?: Record<string, string>) => git(["commit", "--allow-empty", "--no-gpg-sign", "-m", "Test commit"], identity);
+  git(["init", "--quiet"]);
+  commit();
+  const base = git(["rev-parse", "HEAD"]);
+  commit({
+    GIT_AUTHOR_NAME: `Example ${privateWord}`, GIT_AUTHOR_EMAIL: email("machine.LOCAL"),
+    GIT_COMMITTER_NAME: `${privateWord} Example`, GIT_COMMITTER_EMAIL: email(["machine", "lan"].join(".")),
+  });
+  const first = git(["rev-parse", "--short=8", "HEAD"]);
+  const privateEmail = email(`${privateWord}.home`);
+  commit({ GIT_AUTHOR_EMAIL: privateEmail, GIT_COMMITTER_EMAIL: privateEmail });
+  const second = git(["rev-parse", "--short=8", "HEAD"]);
+  commit();
+  const result = Bun.spawnSync([process.execPath, "--no-env-file", join(import.meta.dir, "privacy-check.ts"), `${base}..HEAD`], {
+    cwd: root, env: { ...process.env, REINS_CONFIG: config },
+  });
+  expect(result.exitCode).toBe(1);
+  const output = result.stdout.toString();
+  for (const role of ["author", "committer"]) {
+    expect(output).toContain(`${first} ${role} name  private word from your list`);
+    expect(output).toContain(`${first} ${role} email  private email host`);
+    expect(output).toContain(`${second} ${role} email  private word from your list`);
+    expect(output).toContain(`${second} ${role} email  private email host`);
+  }
+  expect(output).toContain("8 possible private items");
+  expect(output.toLowerCase()).not.toContain(privateWord.toLowerCase());
+});
+
 // Rule: a job past its cap is stopped, so a runaway job cannot keep spending. Made-up job, no model.
 test("a job over its cap is stopped and the ledger says why", async () => {
   const cfg = scratch(), root = cfg.privateDir, fake = join(root, "fake-harness"), prompt = join(root, "p.txt");
+  writeFileSync(join(root, ".env"), `REINS_PRIVATE_DIR="${root}"\nREINS_CONFIG="${join(root, "reins.config.json")}"\n`);
   writeFileSync(fake, '#!/bin/sh\nprintf "%s:%s\\n" "${REINS_PRIVATE_DIR-unset}" "${REINS_CONFIG-unset}"\nsleep 300\n'); chmodSync(fake, 0o755); writeFileSync(prompt, "made-up prompt");
   Object.assign(process.env, { REINS_FAKE_HARNESS: fake, CODEX_SESSIONS_DIR: join(root, "none") });
   const job = await (async () => {
@@ -334,7 +379,7 @@ test("a ticket due within 3 days appears as an at-risk row even when not started
   expect(html).toContain("Not started · 2");
 });
 
-test("failed in a row counts NOT DONE and unfinished attempts and resets after DONE", async () => {
+test("failed in a row skips unknown verdicts and resets only after DONE", async () => {
   const cfg = scratch(), now = Date.parse("2030-01-01T10:00:00Z");
   addTicket(cfg, { id: "demo", title: "Check the index", stage: "building" }, "test", now - 60000);
   const state = await pass({ cfg, now, meters: async () => [] });
@@ -343,11 +388,11 @@ test("failed in a row counts NOT DONE and unfinished attempts and resets after D
     started: new Date(now - 60000 + id * 1000).toISOString(), ended: outcome ? new Date(now - 50000 + id * 1000).toISOString() : null,
   } as Job);
   const older = attempt(1, "failed", null), oldRow = attempt(2, "stopped"), notDone = attempt(3, "finished", false);
-  const stopped = attempt(4, "stopped", null), capped = attempt(5, "capped", null), active = attempt(7, null);
+  const stopped = attempt(4, "stopped", null), capped = attempt(5, "capped"), active = attempt(7, null);
   const failures = (ledger: Job[]) => render(state, now, ledger).match(/class="failures">(.*?)<\/td>/)?.[1];
-  expect(failures([older, oldRow, notDone, stopped, capped, active])).toBe("3");
+  expect(failures([older, oldRow, notDone, stopped, capped, active])).toBe("5");
   expect(failures([older, oldRow, notDone, stopped, capped, attempt(6, "finished", true), active])).toBe("");
-  expect(failures([notDone, attempt(4, "finished", null)])).toBe("");
+  expect(failures([notDone, attempt(4, "finished", null), attempt(5, "finished"), capped])).toBe("2");
 });
 
 test("the week starts at Monday midnight in the configured timezone", async () => {
@@ -358,11 +403,20 @@ test("the week starts at Monday midnight in the configured timezone", async () =
   addTicket(cfg, { id: "new", title: "Current shipment" }, "test", first - 1000);
   moveTicket(cfg, "new", "shipped", "test", monday, "Checked");
   addTicket(cfg, { id: "due", title: "Imminent delivery", due: "2030-01-09" }, "test", first);
-  addTicket(cfg, { id: "queued", title: "Queued delivery" }, "test", first);
+  addTicket(cfg, { id: "active", title: "Active delivery" }, "test", first);
+  for (let i = 1; i <= 5; i++) addTicket(cfg, { id: `queued-${i}`, title: `Queued delivery ${i}` }, "test", first);
   const state = await pass({ cfg, now, meters: async () => [] });
-  const html = render({ ...state, errors: ["Example watcher error"] }, now);
-  expect(html).toContain('<div class="week"><span>This week</span><span><b>1</b> shipped</span><span><b>1</b> in progress</span><span><b>1</b> not started</span>');
-  expect(html.indexOf("This week")).toBeGreaterThan(html.indexOf("Not started · 1"));
+  const active: State["running"][number] = {
+    id: "active-job", name: "Check delivery", kind: "investigation", provider: "codex", model: null, effort: null, ticket: "active",
+    started: new Date(monday).toISOString(), ended: null, minutes: 30, capMinutes: 60, capTokens: 500000,
+    tokens: null, result: null, reason: null, dir: cfg.privateDir,
+  };
+  const html = render({ ...state, running: [active], errors: ["Example watcher error"] }, now);
+  expect(html).toMatch(/Active delivery<\/td>\s*<td[^]*?class="activity"><svg[^]*?Running for /);
+  expect(html).toContain('<div class="week"><span>This week</span><span><b>1</b> shipped</span><span><b>2</b> in progress</span><span><b>5</b> not started</span>');
+  expect(html.indexOf("This week")).toBeGreaterThan(html.indexOf("Not started · 5"));
+  expect(html.match(/Queued delivery [1-5]/g)).toHaveLength(3);
+  expect(html).toContain("and 2 more");
   expect(html).not.toContain("Shipped this week");
   expect(html).toContain("Shipped: Current shipment");
   expect(html).not.toContain("Previous shipment");

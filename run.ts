@@ -68,7 +68,7 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
   delete env.REINS_CONFIG;
   let child;
   try {
-    child = Bun.spawn([process.execPath, import.meta.path, "--record-exit", process.env.REINS_FAKE_HARNESS ?? argv[0]!, ...argv.slice(1)], {
+    child = Bun.spawn([process.execPath, "--no-env-file", import.meta.path, "--record-exit", process.env.REINS_FAKE_HARNESS ?? argv[0]!, ...argv.slice(1)], {
       cwd: resolve(o.cwd), env, detached: true, stdin: "ignore", stdout: log, stderr: log,
     });
   } finally { closeSync(log); }

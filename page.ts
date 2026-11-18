@@ -68,8 +68,8 @@ function elapsedOverPredicted(elapsed: number | null, predicted: number | null) 
 function failedInARow(ended: ReturnType<typeof ticketAttempts>) {
   let failures = 0;
   for (const attempt of ended) {
-    if (attempt.achieved === undefined || (attempt.outcome === "finished" && attempt.achieved !== false)) break;
-    failures++;
+    if (attempt.achieved === true) break;
+    if (attempt.achieved === false || attempt.outcome !== "finished") failures++;
   }
   return failures;
 }
@@ -140,9 +140,9 @@ export function render(s: State, now = Date.now(), ledger: readonly Job[] = []):
   const inProgress = new Set<string>();
   for (const t of s.tickets) {
     const left = t.due ? days(t.due) : Infinity;
-    if (t.stage === "shipped" || (t.stage === "ready" && left > 3)) continue;
-    inProgress.add(t.id);
     const active = s.running.find(j => j.ticket === t.id);
+    if (t.stage === "shipped" || (t.stage === "ready" && left > 3 && !active)) continue;
+    inProgress.add(t.id);
     const ended = ticketAttempts(t.id, ledger).filter(a => a.ended && a.outcome)
       .sort((a, b) => Date.parse(b.ended!) - Date.parse(a.ended!));
     const { elapsed, predicted, state } = t.timing;
@@ -171,8 +171,8 @@ export function render(s: State, now = Date.now(), ledger: readonly Job[] = []):
   const week = `<div class="week"><span>This week</span>${stat("shipped", shipped.length)}${stat("in progress", inProgress.size)}${stat("not started", ready.length)}${s.backlog ? stat(s.backlog.label, s.backlog.count ?? "?") : ""}</div>`;
   const progress = rows.sort((a, b) => a.rank - b.rank).map(r => r.html).join("")
     + spanningRow("group", `Not started · ${ready.length}`)
-    + ready.slice(0, 5).map(t => row("todo", title(t))).join("")
-    + (ready.length > 5 ? spanningRow("more", `and ${ready.length - 5} more`) : "");
+    + ready.slice(0, 3).map(t => row("todo", title(t))).join("")
+    + (ready.length > 3 ? spanningRow("more", `and ${ready.length - 3} more`) : "");
   const usage = s.meters.map(m => usageMeter(m, now, at)).join("");
   const usageKey = '<div class="usage-key"><span><i class="used"></i>used</span><span><i class="projected"></i>by reset</span><span><i class="tick"></i>today</span></div>';
   const news: { at: number; text: string }[] = [];
