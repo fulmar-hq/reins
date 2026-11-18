@@ -53,27 +53,29 @@ holding each job's `prompt.txt`, `log.txt` and `result.txt`.
 
 ## The page
 
-The page shows **Needs you** (open asks), **Running now** (model and effort when recorded, minutes and tokens
-against the caps), **Tickets** by stage, **Shipped today** (model and effort when recorded, tokens, and today's usage
-split), **Meters** (usage, forecast when available, reset and pace), **Notes** (state-of-play notes and defaults
-due or taken) and **Health** (when the
-watcher last ran, when the coordinator last acted, whether sending is live). It is bound to this computer only;
-to see it on a phone, put your own signed-in tunnel in front of it.
+**Needs you** shows open asks. **In progress and due soon** shows ticket pace, consecutive failed attempts, and
+system problems. Open tickets due within three days appear there, even if still ready. **Not started** lists
+the first three remaining ready tickets, then "and N more". **This week** counts shipments since Monday in the configured timezone,
+current work, queued tickets, and the optional backlog. **Usage** shows current readings, projections, and
+where you are in each period. **Today** lists recent job, shipment, and expiry events. The page binds to
+loopback. To see it on a phone, put your own signed-in tunnel in front of it.
 
 ## Tickets
 
 `tickets.json` is `{"tickets": [...]}`. The owner and coordinator agree tickets in chat; only the coordinator
-writes the file, with `bun ticket.ts add|move|order|list`. Each ticket has `id`, `title` (plain words),
+writes the file, with `bun ticket.ts add|set|move|order|list`. Each ticket has `id`, `title` (plain words),
 `stage` (`ready`, `building`, `in review`, `needs owner`, `shipped`), `order` (within ready), an optional `link`,
 `updated`, and a four-part `brief`: `job`, `doneMeans`, `whereToLook`, `check`. The `link` is how a team ties a
-ticket to its own tracker (an issue or pull request URL); nothing here polls that tracker. Launching a job with
-`--ticket <id>` moves the ticket to `building`; nothing else moves a ticket automatically. Every move is recorded
+ticket to its own tracker (an issue or pull request URL). Launching a build or fix with
+`--ticket <id>` moves it to `building`. Launching a review moves it to `in review`. Every move is recorded
 in `events.jsonl` with who made it and when.
 
-Ticket pace starts at the first job and pauses in `needs owner`. The estimate comes from
-`ticket.ts add --estimate <minutes>` or the median of at least three shipped tickets with job starts.
+Ticket pace starts at the first job and pauses in `needs owner`. Adding a ticket requires
+`ticket.ts add --estimate <minutes>`. Older tickets without estimates still show their due dates.
 Pace is on track through 100%, a little over through 150%, and very over after that.
 Use `--due YYYY-MM-DD` to show a due date. Ship with `ticket.ts move <id> shipped --proof "What was checked and where"`.
+Add `--waiting-on <id>` with `ticket.ts add`, or use `ticket.ts set <id> --waiting-on <id>|none` to update
+or clear the optional `waitingOn` reference. The page shows the referenced ticket beneath the ticket title in the main table.
 
 ## The alarms (all to the coordinator, all without tokens)
 
@@ -92,24 +94,30 @@ taken with `notify-owner.ts --resolved <id> "<action taken>"`. The watcher also 
 ask after two days and drops it if it is not reconfirmed within a day. The coordinator records the owner's answer by ask ID. See [the coordinator's commands](COORDINATOR.md#when-to-text-the-owner).
 
 At most 4 texts in any 24 hours by default. After that the ask still appears on the page and the coordinator
-is told the text was held. Channels are Telegram (Bot API) or any command. Coordinator silence appears in Health.
+is told the text was held. Channels are Telegram (Bot API) or any command. Unanswered wakes appear in **In progress**.
 
-On upgrade, existing `needs owner` tickets stay in their ticket stage. Pending free-text asks and old
-`## Needs you` bullets in `state-of-play.md` remain visible. Resolve a free-text ask by its ID and remove
-old bullets once addressed. Move useful background into `## Notes`.
+Pending free-text asks remain visible. Resolve a free-text ask by its ID. Old `## Needs you` bullets
+remain in `state-of-play.md` for the coordinator to review.
 
 ## The ledger
 
-`ledger.jsonl` has one line when a job starts and one when it ends: id, name, kind, tool, ticket, started, ended,
-minutes, tokens (input, cached, output, and fresh = input - cached + output), result (`finished`, `stopped-cap`,
-`stopped-silent`, `failed`, or `ended-unconfirmed` when the job's process could not be confirmed as ours and so
-nothing was signalled) and the run folder. Token counts are read from the tool's own records; a count that
-cannot be read is `null`, never a guess.
+`ledger.jsonl` stores every job start and end. `bun ticket.ts list` shows attempt counts and
+`bun ticket.ts history <id>` outputs one attempt per line, in launch order, from the same ledger.
+Each attempt has an `id` and `name` (the job's identifier and label), a `purpose` (build, review, fix
+or retry), and `retryOf` (the earlier job ID when launched with `--retry-of <job id or run folder name>`).
+Investigation and specialist jobs linked to a ticket count as build attempts unless launched as retries.
+`started` and `ended` are timestamps. `minutes` is the elapsed time and `tokens` records input, cached,
+output and fresh (input minus cached plus output). Unknown counts are null.
+`outcome` is finished, stopped, capped or failed once the job ends, and `why` is the recorded reason.
+The reader derives purpose and outcome from the original kind and result for older jobs.
+The launcher asks for a final line of exactly `VERDICT: DONE` or `VERDICT: NOT DONE`.
+The attempt records `achieved` as true or false for these verdicts, or null when the verdict is missing or the job did not finish.
 
 ## Configuration
 
-Reins reads `reins.config.json` in the private folder. Set `REINS_PRIVATE_DIR` to use a different private folder
-or `REINS_CONFIG` to point directly to another config file. See `reins.config.example.json`.
+Reins looks for `reins.config.json` in `REINS_PRIVATE_DIR` by default. Set `REINS_CONFIG` to point directly
+to a config file. The config's folder holds the private records unless the file sets `privateDir`.
+Launched jobs do not inherit `REINS_PRIVATE_DIR` or `REINS_CONFIG`. See `reins.config.example.json`.
 The config sets which tools are enabled, their everyday model and effort, named **tiers** for other kinds of task (`hard`, `review`, `bulk`,
 `visual`; see "Choosing the model" in `COORDINATOR.md`) and extra arguments, the caps, the timezone, how the owner and coordinator are
 reached, `notify.live` (false means dry-run: nothing leaves this machine; the coordinator's wake file is still written), and optional **extra meters**: a name, a limit, a

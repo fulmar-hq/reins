@@ -15,18 +15,19 @@
   "caps": { "minutes": 60, "tokens": 500000, "silentMinutes": 10 },
   "notify": {
     "live": false,
-    "owner": { "channel": "telegram", "credentialsFile": "~/.reins/telegram.json" },
+    "owner": { "channel": "telegram", "credentialsFile": "/path/to/reins-private/telegram.json" },
     "coordinator": { "channel": "file" },
     "unansweredMinutes": 30,
     "ownerMaxPerDay": 4
   },
   "extraMeters": [
     { "name": "Cloud bill this month", "unit": "$", "limit": 100, "reset": "monthly", "everyHours": 4,
-      "command": ["~/.reins/read-cloud-bill.sh"] }
+      "command": ["/path/to/reins-private/read-cloud-bill.sh"] }
   ],
+  "backlog": { "label": "backlog", "command": ["printf", "%s\\n", "7"], "everyMinutes": 30 },
   "expiries": [
-    { "name": "Cloud sign-in on this Mac", "recordFile": "~/.reins/cloud-signin-at", "hours": 24 }
+    { "name": "Cloud sign-in on this Mac", "recordFile": "/path/to/reins-private/cloud-signin-at", "hours": 24 }
   ],
   "page": { "port": 4319 },
-  "privacyTermsFile": "~/.reins/private-words.txt"
+  "privacyTermsFile": "/path/to/reins-private/private-words.txt"
 }

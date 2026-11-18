@@ -17,6 +17,9 @@ if this is not a Mac.
    `{"botToken": "...", "chatId": "..."}` at `~/.reins/telegram.json` (mode 600). Do not read it back to them.
    (d) Any extra meter they want (for example a cloud bill): a name, a limit, monthly or weekly, and a command
    that prints `{"used": n}` with an optional forecast. Optional; skip unless they ask.
+   (e) To show an optional backlog count, set `backlog.command` to a list of command words that prints a single
+   nonnegative integer. `label` defaults to `backlog`, and `everyMinutes` defaults to 60.
+   If the command fails, the page shows `?` and a red system row.
 3. **Write the config** at `~/.reins/reins.config.json`, starting from `reins.config.example.json`
    and keeping only what applies. Set each tool's everyday model and its tiers from what that tool offers today
    (its `/model` list and the vendor's "which model" page), not from the example's names, which will age; see

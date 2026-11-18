@@ -15,13 +15,17 @@ const RULES: [string, RegExp, (match: string) => boolean][] = [
   ["sign-in portal or internal address", /[A-Za-z0-9.-]*awsapps\.com|[A-Za-z0-9-]+\.(?:internal|corp|lan)\b|\b(?:10|192\.168)\.\d{1,3}\.\d{1,3}(?:\.\d{1,3})?\b/g, m => /[a-z]/i.test(m) || m.split(".").length === 4],
   ["token or key", /\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[\w-]{35}|\d{8,10}:[A-Za-z0-9_-]{35})\b|-----BEGIN [A-Z ]*PRIVATE KEY/g, () => true],
 ];
+const mask = (text: string) => `${text.slice(0, 3)}…(${text.length} characters)`;
+const privateWords = (text: string, terms: string[]) => {
+  const lower = text.toLowerCase();
+  return terms.filter(term => lower.includes(term))
+    .map(term => ({ kind: "private word from your list", masked: mask(term) }));
+};
 /** Findings in one line of text. The suspect text is masked: never echoed in full. */
 export function findings(line: string, terms: string[] = []): { kind: string; masked: string }[] {
-  const mask = (text: string) => `${text.slice(0, 3)}…(${text.length} characters)`, out: { kind: string; masked: string }[] = [];
+  const out: { kind: string; masked: string }[] = [];
   for (const [kind, pattern, real] of RULES) for (const match of line.matchAll(pattern)) if (real(match[0])) out.push({ kind, masked: mask(match[0]) });
-  const lower = line.toLowerCase();
-  for (const term of terms) if (lower.includes(term)) out.push({ kind: "private word from your list", masked: mask(term) });
-  return out;
+  return out.concat(privateWords(line, terms));
 }
 
 if (import.meta.main) {
@@ -34,23 +38,37 @@ if (import.meta.main) {
   let terms: string[] = [], found = 0;
   const file = loadConfig().privacyTermsFile; // a broken config stops the check rather than silently dropping your word list
   if (file) terms = readFileSync(file, "utf8").split("\n").map(t => t.trim().toLowerCase()).filter(Boolean);
-  const report = (where: string, text: string) => { for (const f of findings(text, terms)) { found++; console.log(`${where}  ${f.kind}: ${f.masked}`); } };
+  if (!terms.length) console.error("WARNING: NO PRIVATE WORDS CONFIGURED. Only the built-in privacy rules will run.");
+  const report = (where: string, matches: ReturnType<typeof findings>) => {
+    for (const f of matches) { found++; console.log(`${where}  ${f.kind}: ${f.masked}`); }
+  };
   /** Every added line of one patch, plus (for a commit) the message that precedes it. */
   const scan = (text: string, label: string) => {
     let path = "", line = 0, inPatch = false;
     for (const row of text.split("\n")) {
       if (row.startsWith("diff --git ")) inPatch = true;
-      else if (!inPatch) report(`${label} message`, row);
+      else if (!inPatch) report(`${label} message`, findings(row, terms));
       else if (row.startsWith("+++ ")) path = row.slice(6);
       else if (row.startsWith("@@")) line = Number(row.match(/\+(\d+)/)?.[1] ?? 0);
-      else if (row.startsWith("+")) report(`${label}${path}:${line++}`, row.slice(1));
+      else if (row.startsWith("+")) report(`${label}${path}:${line++}`, findings(row.slice(1), terms));
     }
   };
   let scanned = "staged changes";
   if (range) {
     // Patch by patch, so something added in one commit and removed in a later one is still caught: history is published too.
     const commits = git("rev-list", "--reverse", range, "--").split("\n").filter(Boolean);
-    for (const sha of commits) scan(git("show", "-m", "--unified=0", "--no-color", "--format=%B", sha, "--"), `${sha.slice(0, 8)} `);
+    for (const sha of commits) {
+      const label = sha.slice(0, 8);
+      const identity = git("show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", sha, "--").trimEnd().split("\0");
+      for (const [i, field] of ["author name", "author email", "committer name", "committer email"].entries()) {
+        const value = identity[i]!;
+        const matches = privateWords(value, terms);
+        if (field.endsWith("email") && /@[^@]+\.(?:local|lan|home)$/i.test(value))
+          matches.push({ kind: "private email host", masked: mask(value) });
+        report(`${label} ${field}`, matches);
+      }
+      scan(git("show", "-m", "--unified=0", "--no-color", "--format=%B", sha, "--"), `${label} `);
+    }
     scanned = `${commits.length} commit${commits.length === 1 ? "" : "s"} in ${range}`;
   } else scan("diff --git \n" + git("diff", "--cached", "--unified=0", "--no-color"), "");
   console.log(found ? `${found} possible private item${found > 1 ? "s" : ""}. Remove them (or move them to your private config) before publishing.` : `Privacy check passed (${scanned}; ${terms.length} private words from your list).`);
