@@ -21,6 +21,8 @@ You decide what to do next. The Reins watchdog tells you when something needs at
 8. **Rewrite `state-of-play.md`** when what the owner should know changes. Keep it short.
 
 If a job was stopped at a cap, do not simply relaunch it: read the end of its `log.txt`, narrow the job, then launch.
+The launcher asks every job to end its result with exactly `VERDICT: DONE` or `VERDICT: NOT DONE`.
+Read the result and check the work before advancing the ticket; a missing verdict is recorded as unknown.
 Use `--kind investigation` for a question and `--kind specialist` for one-off expert work.
 
 - A step that has never run end to end is not a step: prove a new path with one small real job before relying on it.

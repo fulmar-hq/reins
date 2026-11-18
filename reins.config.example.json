@@ -24,6 +24,7 @@
     { "name": "Cloud bill this month", "unit": "$", "limit": 100, "reset": "monthly", "everyHours": 4,
       "command": ["~/.reins/read-cloud-bill.sh"] }
   ],
+  "backlog": { "label": "backlog", "command": ["printf", "%s\\n", "7"], "everyMinutes": 30 },
   "expiries": [
     { "name": "Cloud sign-in on this Mac", "recordFile": "~/.reins/cloud-signin-at", "hours": 24 }
   ],

@@ -16,13 +16,14 @@ export type Channel =
   | { channel: "telegram"; credentialsFile: string }; // private JSON file: {"botToken": "...", "chatId": "..."}
 /** Any number you want on the page. `command` prints JSON: {"used": n} plus optional "forecast" and "limit" (or {"reason": "why unknown"}). */
 export type ExtraMeter = { name: string; limit: number; unit?: string; reset: "monthly" | "weekly"; command: string[]; everyHours?: number };
+export type Backlog = { label: string; command: string[]; everyMinutes: number };
 /** A sign-in that lapses: `recordFile` holds the ISO time it was made; the owner is told 3 hours before `hours` are up. */
 export type Expiry = { name: string; recordFile: string; hours: number; pausedFile?: string };
 export type Config = {
   privateDir: string; timezone: string; defaultProvider: ProviderName; providers: Partial<Record<ProviderName, ProviderConfig>>;
   caps: { minutes: number; tokens: number; silentMinutes: number };
   notify: { live: boolean; owner: Channel; coordinator: Channel; unansweredMinutes: number; ownerMaxPerDay: number };
-  extraMeters: ExtraMeter[]; expiries: Expiry[]; page: { port: number }; privacyTermsFile?: string;
+  extraMeters: ExtraMeter[]; backlog?: Backlog; expiries: Expiry[]; page: { port: number }; privacyTermsFile?: string;
 };
 
 const home = (path: string) => resolve(path.replace(/^~(?=\/|$)/, homedir()));
@@ -30,6 +31,7 @@ export const configPath = () => home(process.env.REINS_CONFIG ?? join(process.en
 
 /** Defaults merged with the file. Throws a plain sentence when the file is wrong. */
 export function loadConfig(path = configPath(), raw?: Record<string, any>): Config {
+  path = home(path);
   if (!raw) try { raw = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {}; } catch (error) { throw Error(`${path} is not valid JSON: ${String(error)}`); }
   const r = raw!, installed = (["codex", "claude"] as const).filter(name => Bun.which(name));
   const providers: Config["providers"] = r.providers ?? Object.fromEntries(installed.map(name => [name, { enabled: true }]));
@@ -51,18 +53,26 @@ export function loadConfig(path = configPath(), raw?: Record<string, any>): Conf
       throw Error('Each extra meter needs a name, a limit above zero, reset "monthly" or "weekly", and a command (a list of words).');
     return { ...m, command: m.command.map(tilde) };
   });
+  let backlog: Backlog | undefined;
+  if (r.backlog != null) {
+    const { label = "backlog", command, everyMinutes = 60 } = r.backlog;
+    if (typeof label !== "string" || !label.trim() || !Number.isFinite(everyMinutes) || everyMinutes <= 0
+      || !Array.isArray(command) || !command.length || !command.every(part => typeof part === "string") || !command[0])
+      throw Error("backlog needs a command (a list of words), an optional label, and a positive everyMinutes.");
+    backlog = { label, command: command.map(tilde), everyMinutes };
+  }
   const expiries: Expiry[] = (r.expiries ?? []).map((e: any) => {
     if (typeof e.name !== "string" || typeof e.recordFile !== "string" || !(e.hours > 0)) throw Error("Each expiry needs a name, a recordFile and hours.");
     return { ...e, recordFile: home(e.recordFile), pausedFile: e.pausedFile && home(e.pausedFile) };
   });
   if (r.defaultProvider && !enabled.includes(r.defaultProvider)) throw Error(`defaultProvider "${r.defaultProvider}" is not an enabled provider.`);
   return {
-    privateDir: home(r.privateDir ?? process.env.REINS_PRIVATE_DIR ?? dirname(path)), timezone,
+    privateDir: home(r.privateDir ?? dirname(path)), timezone,
     defaultProvider: r.defaultProvider ?? enabled[0] ?? "codex", providers,
     caps: { minutes: 60, tokens: 500_000, silentMinutes: 10, ...r.caps },
     notify: { live: r.notify?.live === true, owner: channel(r.notify?.owner, "owner"), coordinator: channel(r.notify?.coordinator ?? { channel: "file" }, "coordinator"),
       unansweredMinutes: r.notify?.unansweredMinutes ?? 30, ownerMaxPerDay: r.notify?.ownerMaxPerDay ?? 4 },
-    extraMeters, expiries, page: { port: 4319, ...r.page }, privacyTermsFile: r.privacyTermsFile && home(r.privacyTermsFile),
+    extraMeters, backlog, expiries, page: { port: 4319, ...r.page }, privacyTermsFile: r.privacyTermsFile && home(r.privacyTermsFile),
   };
 }
 export const enabledProviders = (cfg: Config) => (Object.keys(cfg.providers) as ProviderName[]).filter(name => cfg.providers[name]?.enabled);

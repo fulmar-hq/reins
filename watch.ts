@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { join } from "node:path";
 import { enabledProviders, loadConfig, type Config } from "./config";
 import { EXIT_NOTE, KINDS, NO_RESULT, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, slice, ticketAttempts, type Event, type Job, type Outcome, type Result, type Tokens } from "./lib";
-import { meterLine, readMeters, type Meter } from "./meters";
+import { meterLine, readBacklog, readMeters, type Meter } from "./meters";
 import { legacyAsks, newsHealth, recordWake, reviewAsks, send, unansweredMinutes, type Message } from "./notify";
 import { PROVIDERS } from "./providers";
 import { STAGES, byStage, readTickets, showMinutes, ticketTimings, type Ticket } from "./ticket";
@@ -41,6 +41,14 @@ function harnessExit(dir: string) {
     if (status === "signal") return status;
     if (/^\d+$/.test(status)) return Number(status);
   } catch { /* old or missing log */ }
+}
+function achievedResult(dir: string): boolean | null {
+  try {
+    const line = slice(join(dir, "result.txt"), 4096, "end").replace(/[\r\n]+$/, "").split("\n").at(-1);
+    if (line === "VERDICT: DONE") return true;
+    if (line === "VERDICT: NOT DONE") return false;
+  } catch { /* result unavailable */ }
+  return null;
 }
 /** True only while the recorded process is still this job: same pid, same start time, leading its own group. */
 const alive = (job: Job) => isOurLeader(job.pid, job.pidStarted);
@@ -113,7 +121,8 @@ export async function pass(o: Options = {}) {
     if (!verdict) { running.push({ ...job, tokens: facts.tokens, minutesSoFar: minutesBetween(started, now) }); continue; }
     stop(job);
     const tokens = provider.facts(job.dir, started).tokens, minutes = minutesBetween(started, now);
-    appendLine(f.ledger, { ...job, event: "ended", ended: new Date(now).toISOString(), minutes, tokens, ...verdict } satisfies Job);
+    const achieved = verdict.outcome === "finished" ? achievedResult(job.dir) : null;
+    appendLine(f.ledger, { ...job, event: "ended", ended: new Date(now).toISOString(), minutes, tokens, ...verdict, achieved } satisfies Job);
     const used = `${minutes} min, ${count(tokens?.fresh)} tokens`;
     const summary = verdict.outcome === "failed" ? "Failed" : "Stopped";
     emit(`job:${job.id}`, verdict.result, verdict.outcome === "finished" ? `Finished: ${job.name} (${used}).` : `${summary}: ${job.name}, ${verdict.reason} (${used}).`, { dir: job.dir });
@@ -122,7 +131,9 @@ export async function pass(o: Options = {}) {
   // 2. Meters, refreshed every 15 minutes; between refreshes the last reading stands.
   let meters: Meter[] = previous.meters ?? [], metersAt: number = previous.metersAt ?? 0;
   const refresh = now - metersAt >= METER_GAP_MS;
+  const backlogRead = readBacklog(cfg.backlog, previous.backlog, now);
   if (refresh) try { meters = await (o.meters ?? readMeters)(cfg, meters, now); metersAt = now; } catch (error) { errors.push(`meters: ${String(error)}`); }
+  const backlog = await backlogRead;
   for (const m of meters) {
     if (m.used === null || m.reason) continue; // only a fresh real reading can raise an event
     const crossed = [1, 0.8, 0.5].find(t => m.used! >= t);
@@ -205,7 +216,7 @@ export async function pass(o: Options = {}) {
   const state = {
     at: now, timezone: cfg.timezone, sending: live ? "live" : "dry-run", notes: [...play.notes, ...defaultNotes], stateOfPlayAt: play.rewrittenAt, needsYou: play.needsYou,
     running: running.map(row), tickets: ticketRows, stages: STAGES, shippedToday: shipped.map(row), stoppedToday: ended.filter(j => j.result !== "finished").map(row),
-    split: { day: today, ...split, overhead, total }, meters, metersAt, expiries, idleSince, lastSeen, coordinatorUnresponsive,
+    split: { day: today, ...split, overhead, total }, meters, metersAt, backlog, expiries, idleSince, lastSeen, coordinatorUnresponsive,
     ownerAsks: [...ownerAsks, ...legacyAsks(activity).map(e => ({ id: e.key, at: e.at, text: e.text }))],
     ...health, fileWake: cfg.notify.coordinator.channel === "file",
     notify: cursor, outbox: outbox.slice(-10), errors,

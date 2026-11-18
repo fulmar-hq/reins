@@ -3,7 +3,7 @@
 // bun run.ts --kind build|review|fix|investigation|specialist --name "plain words" --cwd <dir> --prompt <file>
 //   [--provider codex|claude] [--ticket id] [--retry-of <job id or run folder name>]
 //   [--cap-tokens n] [--cap-minutes n] [--tier name] [--model m] [--effort e] [--dir <run folder>] [--print]
-import { closeSync, constants, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { enabledProviders, loadConfig, type Config, type ProviderName } from "./config";
 import { EXIT_NOTE, KINDS, appendLine, files, jobs, processStarted, purposeForKind, withLock, type Job, type Kind } from "./lib";
@@ -14,6 +14,8 @@ export type Launch = {
   kind: Kind; name: string; cwd: string; prompt: string; provider?: ProviderName; ticket?: string; capTokens?: number; capMinutes?: number;
   tier?: string; model?: string; effort?: string; dir?: string; now?: number; retryOf?: string;
 };
+const verdictInstruction = 'The last line of your result must be exactly "VERDICT: DONE" if you achieved what you were asked to do, or "VERDICT: NOT DONE" if you did not.';
+
 /** The exact command a launch would run, without running it. */
 export function plan(cfg: Config, o: Launch, dir = "<run folder>") {
   const provider = o.provider ?? cfg.defaultProvider, settings = cfg.providers[provider];
@@ -28,8 +30,9 @@ export function plan(cfg: Config, o: Launch, dir = "<run folder>") {
   const tiers = settings!.tiers ?? {};
   if (o.tier && !tiers[o.tier]) throw Error(`${provider} has no tier "${o.tier}" in the config (tiers: ${Object.keys(tiers).join(", ") || "none"}).`);
   const tier = tiers[o.tier ?? o.kind] ?? {}, model = o.model ?? tier.model ?? settings!.model, effort = o.effort ?? tier.effort ?? settings!.effort;
-  const argv = PROVIDERS[provider].command({ ...settings!, model, effort, cwd: o.cwd, dir, prompt: readFileSync(o.prompt, "utf8") });
-  return { provider, argv, model: model ?? null, effort: effort ?? null };
+  const prompt = readFileSync(o.prompt, "utf8") + "\n\n" + verdictInstruction;
+  const argv = PROVIDERS[provider].command({ ...settings!, model, effort, cwd: o.cwd, dir, prompt });
+  return { provider, argv, prompt, model: model ?? null, effort: effort ?? null };
 }
 export async function launch(cfg: Config, o: Launch): Promise<Job> {
   plan(cfg, o); // refuse a bad request before creating anything
@@ -53,17 +56,20 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
   const slug = o.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "job";
   let dir = o.dir ? resolve(o.dir) : join(f.jobs, `${day}-${slug}`);
   if (!o.dir && existsSync(dir)) dir += `-${time}`;
-  const prompt = join(dir, "prompt.txt");
   // A run folder is used once. Anything already there is someone's evidence: refuse, never overwrite.
   for (const name of ["prompt.txt", "log.txt", "result.txt", "job.json"]) if (existsSync(join(dir, name))) throw Error(`This run folder already holds a job (${name}); choose a new folder: ${dir}`);
+  const { provider, argv, prompt, model, effort } = plan(cfg, o, dir);
   mkdirSync(dir, { recursive: true });
-  copyFileSync(o.prompt, prompt, constants.COPYFILE_EXCL);
-  const { provider, argv, model, effort } = plan(cfg, { ...o, prompt }, dir), log = openSync(join(dir, "log.txt"), "ax");
+  writeFileSync(join(dir, "prompt.txt"), prompt, { mode: 0o600, flag: "wx" });
+  const log = openSync(join(dir, "log.txt"), "ax");
   // `detached` gives the job its own process group, which is what the watcher stops.
+  const env = { ...process.env };
+  delete env.REINS_PRIVATE_DIR;
+  delete env.REINS_CONFIG;
   let child;
   try {
     child = Bun.spawn([process.execPath, import.meta.path, "--record-exit", process.env.REINS_FAKE_HARNESS ?? argv[0]!, ...argv.slice(1)], {
-      cwd: resolve(o.cwd), detached: true, stdin: "ignore", stdout: log, stderr: log,
+      cwd: resolve(o.cwd), env, detached: true, stdin: "ignore", stdout: log, stderr: log,
     });
   } finally { closeSync(log); }
   child.unref();
@@ -102,7 +108,7 @@ if (import.meta.main && process.argv[2] === "--record-exit") {
       ticket: value("--ticket"), retryOf: args.includes("--retry-of") ? value("--retry-of") ?? "" : undefined,
       capTokens: number("--cap-tokens"), capMinutes: number("--cap-minutes"), tier: value("--tier"), model: value("--model"), effort: value("--effort"), dir: value("--dir"),
     };
-    if (args.includes("--print")) { const { provider, argv } = plan(cfg, request); const text = readFileSync(request.prompt, "utf8"); console.log(`${provider}: ${argv.map(a => a === text ? "<prompt>" : /\s/.test(a) ? JSON.stringify(a) : a).join(" ")}`); }
+    if (args.includes("--print")) { const { provider, argv, prompt } = plan(cfg, request); console.log(`${provider}: ${argv.map(a => a === prompt ? "<prompt>" : /\s/.test(a) ? JSON.stringify(a) : a).join(" ")}`); }
     else console.log((await launch(cfg, request)).dir);
     process.exit(0);
   } catch (error) {

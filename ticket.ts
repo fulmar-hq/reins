@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // The tickets file and the coordinator's one-line commands for it. Only the coordinator writes it.
-//   bun ticket.ts add --id 12 --title "Plain words" [--estimate minutes] [--due YYYY-MM-DD] [--waiting-on id]
+//   bun ticket.ts add --id 12 --title "Plain words" --estimate minutes [--due YYYY-MM-DD] [--waiting-on id]
 //   bun ticket.ts set 12 --waiting-on <id|none>      bun ticket.ts history 12
 //   bun ticket.ts move 12 in review [--by name]      bun ticket.ts order 14 12 13      bun ticket.ts list
 //   bun ticket.ts move 12 shipped --proof "What was checked and where"
@@ -88,7 +88,7 @@ export function orderTickets(cfg: Config, ids: string[], by = "coordinator", now
     save(cfg, tickets, `set the order to ${ids.join(", ")}`, by, now);
   });
 }
-export const byStage = (tickets: Ticket[], stage: Stage) => tickets.filter(t => t.stage === stage).sort((a, b) => stage === "ready" ? a.order - b.order : Date.parse(b.updated) - Date.parse(a.updated));
+export const byStage = <T extends Ticket>(tickets: T[], stage: Stage) => tickets.filter(t => t.stage === stage).sort((a, b) => stage === "ready" ? a.order - b.order : Date.parse(b.updated) - Date.parse(a.updated));
 
 export const showMinutes = (minutes: number) => String(Number(minutes.toFixed(1)));
 
@@ -116,10 +116,8 @@ export function ticketTimings(tickets: Ticket[], all: Job[], events: Event[], no
       : ms + Math.max(0, (stages[i + 1]?.time ?? end) - Math.max(start, time)), 0);
     return { t, ms: end - start - paused };
   });
-  const past = times.flatMap(({ t, ms }) => t.stage === "shipped" && Date.parse(t.updated) <= now && ms !== null ? [ms] : []).sort((a, b) => a - b);
-  const median = past.length < 3 ? null : (past[Math.floor((past.length - 1) / 2)]! + past[Math.floor(past.length / 2)]!) / 120000;
   return new Map(times.map(({ t, ms }) => {
-    const predicted = t.estimate ?? median, elapsed = ms === null ? null : ms / 60000;
+    const predicted = t.estimate ?? null, elapsed = ms === null ? null : ms / 60000;
     // Divide elapsed milliseconds by 1.5 minutes before comparing to the estimate.
     const state = ms === null || predicted === null ? null
       : ms / 60000 <= predicted ? "on track" : ms / 90000 <= predicted ? "a little over" : "very over";
@@ -142,9 +140,9 @@ if (import.meta.main) {
     const by = flag("--by");
     if (verb === "add") {
       const id = flag("--id"), title = flag("--title"), estimate = flag("--estimate"), due = flag("--due");
-      if (!id || !title) throw Error("add needs --id and --title");
+      if (!id || !title || estimate === undefined) throw Error("add needs --id, --title, and --estimate in minutes");
       addTicket(cfg, { id, title, stage: flag("--stage") as Stage | undefined, link: flag("--link"),
-        estimate: estimate === undefined ? undefined : Number(estimate), due, waitingOn: flag("--waiting-on"),
+        estimate: Number(estimate), due, waitingOn: flag("--waiting-on"),
         brief: { job: flag("--job") ?? "", doneMeans: flag("--done") ?? "", whereToLook: flag("--where") ?? "", check: flag("--check") ?? "" } }, by);
     } else if (verb === "set") {
       const waitingOn = flag("--waiting-on");
@@ -153,7 +151,8 @@ if (import.meta.main) {
     } else if (verb === "history") {
       if (rest.length !== 1) throw Error("history needs a ticket id");
       const ticket = ticketById(readTickets(cfg), rest[0]!);
-      for (const attempt of ticketAttempts(ticket.id, jobs(files(cfg).ledger))) console.log(JSON.stringify(attempt));
+      for (const attempt of ticketAttempts(ticket.id, jobs(files(cfg).ledger)))
+        console.log(JSON.stringify({ ...attempt, achieved: attempt.achieved ?? null }));
       process.exit(0);
     } else if (verb === "move") {
       const proof = flag("--proof");

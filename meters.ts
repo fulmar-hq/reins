@@ -1,14 +1,30 @@
 // Meters: one per usage window of each enabled harness, plus any extra meters from the config.
 // A failed read keeps the last real value with its date and the reason, or says "unknown since". Nothing is estimated.
-import { enabledProviders, type Config, type ExtraMeter } from "./config";
+import { enabledProviders, type Backlog, type Config, type ExtraMeter } from "./config";
 import { exec, pace, percent } from "./lib";
 import { PROVIDERS } from "./providers";
 
 export type Meter = {
-  id: string; label: string; used: number | null; forecast?: number; detail: string | null; start: number | null; resetsAt: number | null;
+  id: string; label: string; used: number | null; forecast?: number; detail: string | null; figure?: string; start: number | null; resetsAt: number | null;
   observedAt: number | null; checkedAt: number; verdict: string | null; runsOutAt: number | null; unknownSince: number | null; reason: string | null;
 };
 const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const dueForReading = (now: number, intervalMinutes: number, previous?: { checkedAt: number }) =>
+  !previous || now - previous.checkedAt >= intervalMinutes * 60000;
+const readCommand = (command: string[]) => exec(command, { timeoutMs: 30000 });
+
+export type BacklogReading = { label: string; count: number | null; checkedAt: number };
+export async function readBacklog(cfg: Backlog | undefined, previous: BacklogReading | undefined, now: number) {
+  if (!cfg) return undefined;
+  if (previous?.label === cfg.label && !dueForReading(now, cfg.everyMinutes, previous)) return previous;
+  let count = null;
+  try {
+    const out = (await readCommand(cfg.command)).trim();
+    const value = Number(out);
+    if (/^\d+$/.test(out) && Number.isSafeInteger(value)) count = value;
+  } catch { /* show an unknown reading until the next scheduled check */ }
+  return { label: cfg.label, count, checkedAt: now } satisfies BacklogReading;
+}
 
 export function reading(id: string, label: string, used: number, start: number | null, resetsAt: number, observedAt: number, detail: string | null = null, forecast?: number): Meter {
   const p = start === null ? null : pace(used, start, resetsAt, observedAt, forecast);
@@ -29,13 +45,15 @@ export function window(reset: ExtraMeter["reset"], now: number) {
 }
 async function extra(m: ExtraMeter, previous: Meter[], now: number): Promise<Meter[]> {
   const id = `extra-${slug(m.name)}`, old = previous.filter(p => p.id === id), { start, end } = window(m.reset, now);
-  if (old[0] && now - old[0].checkedAt < (m.everyHours ?? 1) * 3600000) return old;
+  if (!dueForReading(now, (m.everyHours ?? 1) * 60, old[0])) return old;
   let out: any;
-  try { out = JSON.parse(await exec(m.command, { timeoutMs: 30000 })); } catch { return kept(old, id, m.name, now, "its command failed or did not print JSON"); }
+  try { out = JSON.parse(await readCommand(m.command)); } catch { return kept(old, id, m.name, now, "its command failed or did not print JSON"); }
   if (!Number.isFinite(out?.used) || out.used < 0) return kept(old, id, m.name, now, typeof out?.reason === "string" ? out.reason.slice(0, 200) : 'its command printed no "used" number');
   const limit = out.limit > 0 ? Number(out.limit) : m.limit, unit = m.unit ?? "", amount = (n: number) => `${unit}${Number(n.toFixed(2))}`;
   const forecast = Number.isFinite(out.forecast) ? out.forecast / limit : undefined;
-  return [reading(id, m.name, out.used / limit, start, end, now, `${amount(out.used)} of ${amount(limit)}${forecast === undefined ? "" : `, forecast ${amount(out.forecast)}`}`, forecast)];
+  const used = amount(out.used), maximum = amount(limit);
+  const detail = `${used} of ${maximum}${forecast === undefined ? "" : `, forecast ${amount(out.forecast)}`}`;
+  return [{ ...reading(id, m.name, out.used / limit, start, end, now, detail, forecast), figure: `${used} / ${maximum}` }];
 }
 async function harness(cfg: Config, name: ReturnType<typeof enabledProviders>[number], previous: Meter[], now: number): Promise<Meter[]> {
   const p = PROVIDERS[name], old = previous.filter(m => m.id.startsWith(`${name}-`) || m.id === name);

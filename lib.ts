@@ -17,7 +17,7 @@ export type Tokens = { input: number | null; cached: number | null; output: numb
 export type Job = {
   event: "started" | "ended"; id: string; name: string; kind: Kind; provider: ProviderName; model?: string | null; effort?: string | null; ticket: string | null;
   started: string; ended: string | null; minutes: number | null; tokens: Tokens | null;
-  purpose?: Purpose; retryOf?: string | null; outcome?: Outcome | null;
+  purpose?: Purpose; retryOf?: string | null; outcome?: Outcome | null; achieved?: boolean | null;
   result: Result | null; reason: string | null; dir: string; pid: number; pidStarted: string; capMinutes: number; capTokens: number;
 };
 export type Ask = { question: string; recommendation: string; reason: string; fallback: { at: number; action: string } | null };
@@ -54,6 +54,7 @@ export function ticketAttempts(id: string, ledger: readonly Job[]) {
     id: j.id, name: j.name, purpose: j.purpose ?? purposeForKind(j.kind), retryOf: j.retryOf ?? null,
     started: j.started, ended: j.ended, minutes: j.minutes, tokens: j.tokens,
     outcome: jobOutcome(j),
+    achieved: j.achieved,
     why: j.reason,
   }));
 }

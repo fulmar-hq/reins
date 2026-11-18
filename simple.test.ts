@@ -1,36 +1,74 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { loadConfig } from "./config";
 import { spawn } from "node:child_process";
 import { appendLine, files, jobs, pace, processStarted, readLines, ticketAttempts, withLock, type Event, type Job } from "./lib";
 import { send, takeNews, textOwner, updateAsk } from "./notify";
+import { reading } from "./meters";
 import { render } from "./page";
 import { launch, plan } from "./run";
 import { addTicket, moveTicket, readTickets, ticketTimings } from "./ticket";
 import { batch, pass, stop } from "./watch";
 
+function assertPrivateDir(root: string, privateDir: string) {
+  const local = relative(root, privateDir);
+  if (isAbsolute(local) || local === ".." || local.startsWith(".." + sep))
+    throw Error("Test config resolved outside its temporary folder");
+}
+
 const scratch = (extra: Record<string, unknown> = {}) => {
   const root = mkdtempSync(join(tmpdir(), "reins-"));
-  return loadConfig(join(root, "reins.config.json"), { privateDir: root, timezone: "UTC", providers: { codex: { enabled: true } }, ...extra });
+  const cfg = loadConfig(join(root, "reins.config.json"), { timezone: "UTC", providers: { codex: { enabled: true } }, ...extra });
+  assertPrivateDir(root, cfg.privateDir);
+  return cfg;
 };
 const sampleAsk = ["Can you sign in again?", "Renew the existing sign-in.", "sign-in or credential", "--no-safe-default"];
+
+test("a config loaded from another folder never touches the folder named by the environment", () => {
+  const root = mkdtempSync(join(tmpdir(), "reins-config-"));
+  const explicit = join(root, "explicit"), inherited = join(root, "inherited");
+  const path = join(explicit, "reins.config.json");
+  mkdirSync(explicit);
+  writeFileSync(path, '{"timezone":"UTC","providers":{}}');
+  const previous = process.env.REINS_PRIVATE_DIR;
+  process.env.REINS_PRIVATE_DIR = inherited;
+  try {
+    const cfg = loadConfig(path);
+    assertPrivateDir(root, cfg.privateDir);
+    expect(cfg.privateDir).toBe(explicit);
+    addTicket(cfg, { id: "local", title: "Check this folder", estimate: 15 });
+    expect(readTickets(cfg)).toHaveLength(1);
+    expect(existsSync(inherited)).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.REINS_PRIVATE_DIR;
+    else process.env.REINS_PRIVATE_DIR = previous;
+  }
+});
 
 // Rule: a job past its cap is stopped, so a runaway job cannot keep spending. Made-up job, no model.
 test("a job over its cap is stopped and the ledger says why", async () => {
   const cfg = scratch(), root = cfg.privateDir, fake = join(root, "fake-harness"), prompt = join(root, "p.txt");
-  writeFileSync(fake, "#!/bin/sh\necho started\nsleep 300\n"); chmodSync(fake, 0o755); writeFileSync(prompt, "made-up prompt");
+  writeFileSync(fake, '#!/bin/sh\nprintf "%s:%s\\n" "${REINS_PRIVATE_DIR-unset}" "${REINS_CONFIG-unset}"\nsleep 300\n'); chmodSync(fake, 0o755); writeFileSync(prompt, "made-up prompt");
   Object.assign(process.env, { REINS_FAKE_HARNESS: fake, CODEX_SESSIONS_DIR: join(root, "none") });
-  const job = await launch(cfg, { kind: "build", name: "Made-up runaway", cwd: root, prompt, capMinutes: 1 });
+  const job = await (async () => {
+    Object.assign(process.env, { REINS_PRIVATE_DIR: root, REINS_CONFIG: join(root, "reins.config.json") });
+    try { return await launch(cfg, { kind: "build", name: "Made-up runaway", cwd: root, prompt, capMinutes: 1 }); }
+    finally { delete process.env.REINS_PRIVATE_DIR; delete process.env.REINS_CONFIG; }
+  })();
+  expect(readFileSync(join(job.dir, "prompt.txt"), "utf8")).toContain('exactly "VERDICT: DONE"');
   const running = () => Bun.spawnSync(["ps", "-o", "pid=", "-g", String(job.pid)]).stdout.toString().trim() !== "";
   expect(running()).toBe(true);
+  const log = () => readFileSync(join(job.dir, "log.txt"), "utf8");
+  for (let i = 0; i < 20 && !log().includes("unset:unset"); i++) await Bun.sleep(50);
   await pass({ cfg, now: Date.now() + 30000, meters: async () => [] });
   expect(running()).toBe(true); // under the cap: left alone
   await pass({ cfg, now: Date.now() + 2 * 60000, meters: async () => [] });
   for (let i = 0; i < 20 && running(); i++) await Bun.sleep(50); // the kernel reaps the group a moment after the signal
   expect(running()).toBe(false);
-  expect(jobs(files(cfg).ledger)[0]).toMatchObject({ event: "ended", result: "stopped-cap", outcome: "capped", tokens: null, dir: job.dir });
+  expect(log()).toContain("unset:unset");
+  expect(jobs(files(cfg).ledger)[0]).toMatchObject({ event: "ended", result: "stopped-cap", outcome: "capped", achieved: null, tokens: null, dir: job.dir });
   expect(readLines<Event>(files(cfg).events).map(e => e.type)).toEqual(["stopped-cap", "wake"]); // one event, one wake
 });
 
@@ -56,7 +94,7 @@ test("a burst of events becomes one wake", () => {
 });
 
 // Rule: the pace verdict is what warns the owner that a limit will run out early; its arithmetic must hold.
-test("pace verdict arithmetic", () => {
+test("pace verdict arithmetic", async () => {
   const day = 86400000, start = 0, reset = 7 * day;
   expect(pace(0.5, start, reset, 3.5 * day)).toEqual({ verdict: "on track", runsOutAt: null }); // exactly on the line
   expect(pace(0.3, start, reset, 3.5 * day)).toEqual({ verdict: "plenty left", runsOutAt: null }); // heading for 60%
@@ -68,6 +106,18 @@ test("pace verdict arithmetic", () => {
   // A forecast from the source replaces the straight line: ahead of the line but forecast under the limit is fine,
   expect(pace(0.56, start, reset, 3.5 * day, 0.86)).toEqual({ verdict: "on track", runsOutAt: null });
   expect(pace(0.4, start, reset, 3.5 * day, 1.2).verdict).toBe("too fast"); // and behind the line but forecast over is not.
+
+  const cfg = scratch({ providers: {} }), now = 4 * day;
+  const meters = [
+    reading("steady", "Steady", 0.3, start, reset, 3 * day),
+    reading("ahead", "Ahead", 0.7, start, reset, 3 * day),
+    reading("full", "Full", 1, start, reset, now),
+  ];
+  const html = render(await pass({ cfg, now, meters: async () => meters }), now);
+  expect(html).toContain('aria-label="30% used · 70% by reset · 57% today"');
+  expect(html).toContain('class="bar soon"');
+  expect(html).toContain('class="bar late"');
+  for (const phrase of ["runs out", "heading to", "of the week", "too fast", "on track"]) expect(html).not.toContain(phrase);
 });
 
 test("ticket pace boundaries exclude time in needs owner", () => {
@@ -84,6 +134,39 @@ test("ticket pace boundaries exclude time in needs owner", () => {
   expect(timing(16.01)).toMatchObject({ state: "a little over" });
   expect(timing(21)).toMatchObject({ elapsed: 15, state: "a little over" });
   expect(timing(21.01)).toMatchObject({ state: "very over" });
+});
+
+test("a ticket without an estimate is never late by pace", async () => {
+  const cfg = scratch(), now = Date.parse("2030-01-08T15:00:00Z"), minute = 60000;
+  const job = (ticket: string, start: number) => ({ ticket, started: new Date(start).toISOString() } as Job);
+  const shipped = [1, 2, 3].map(i => {
+    const id = `shipped-${i}`, start = now - 120 * minute;
+    addTicket(cfg, { id, title: `Past delivery ${i}`, estimate: 10 }, "test", start);
+    moveTicket(cfg, id, "shipped", "test", start + 10 * minute, "Checked");
+    return job(id, start);
+  });
+  addTicket(cfg, { id: "legacy", title: "Pack the model", stage: "building" }, "test", now - 60 * minute);
+  const timing = ticketTimings(readTickets(cfg), [...shipped, job("legacy", now - 60 * minute)],
+    readLines<Event>(files(cfg).events), now).get("legacy");
+  expect(timing).toEqual({ elapsed: 60, predicted: null, state: null });
+
+  const state = await pass({ cfg, now, meters: async () => [] });
+  const oldState = { ...state, tickets: state.tickets.map(t => t.id === "legacy"
+    ? { ...t, timing: { elapsed: 60, predicted: 10, state: "very over" as const } } : t) };
+  const row = render(oldState, now);
+  expect(row).toContain('class="dot idle"');
+  expect(row).toContain("no estimate");
+  const due = render({ ...oldState, tickets: oldState.tickets.map(t => t.id === "legacy" ? { ...t, due: "2030-01-07" } : t) }, now);
+  expect(due).toContain('class="dot late"');
+  expect(due).toContain("Mon · 1 day late<br>no estimate");
+
+  const add = (...args: string[]) => Bun.spawnSync([process.execPath, join(import.meta.dir, "ticket.ts"),
+    "add", "--id", "new", "--title", "Start another model", ...args], {
+    env: { ...process.env, REINS_CONFIG: join(cfg.privateDir, "reins.config.json") },
+  });
+  expect(add().exitCode).toBe(1);
+  expect(add("--estimate", "20").exitCode).toBe(0);
+  expect(readTickets(cfg).find(t => t.id === "new")?.estimate).toBe(20);
 });
 
 test("shipping a ticket is refused without proof", () => {
@@ -194,7 +277,7 @@ test("waiting news is reported until the coordinator takes it", async () => {
   const now = Date.now(), watch = (minutes: number) => pass({ cfg, now: now + minutes * 60000, meters: async () => [] });
   expect((await watch(1)).wakeWarning).toBeNull();
   const state = await watch(3);
-  expect(render(state, state.at)).toContain('<span class="why">News has been waiting 3 minutes; nobody is listening: start bun wait.ts</span>');
+  expect(render(state, state.at)).toContain('title="News has been waiting 3 minutes; nobody is listening: start bun wait.ts"');
   expect(takeNews(cfg, () => {})).toBe(true);
   const next = await watch(4);
   expect(next.wakeWarning).toBeNull();
@@ -223,10 +306,10 @@ test("a very over ticket is stuck unless a job is running on it", async () => {
     ended: new Date(now - 60000).toISOString(), result: "stopped-cap", reason: "minute cap reached" } as Job;
   appendLine(files(cfg).ledger, job);
   const state = await pass({ cfg, now, meters: async () => [] });
-  expect(render(state, now, [job])).toContain('class="sr-only">Late and stuck. </span>Trace a route');
+  expect(render(state, now, [job])).toContain('class="sr-only">Late, idle. </span>Trace a route');
   const running = { ...job, model: null, effort: null, id: "second", started: new Date(now - 60000).toISOString(), ended: null, minutes: 1,
     event: "started", result: null, reason: null } as const;
-  expect(render({ ...state, running: [running] }, now, [job, running])).toContain('class="sr-only">Late but moving. </span>Trace a route');
+  expect(render({ ...state, running: [running] }, now, [job, running])).toContain('class="sr-only">Late, running. </span>Trace a route');
 });
 
 test("Needs you is absent with no open asks", async () => {
@@ -234,18 +317,55 @@ test("Needs you is absent with no open asks", async () => {
   expect(render(state, now)).not.toContain("Needs you");
 });
 
-test("the deadline shows the nearest open due ticket and what it waits on", async () => {
+test("a ticket due within 3 days appears as an at-risk row even when not started", async () => {
   const cfg = scratch(), now = Date.parse("2030-01-01T10:00:00Z");
-  addTicket(cfg, { id: "waiting", title: "Collect feedback" }, "test", now);
-  addTicket(cfg, { id: "earlier", title: "Close old thread", due: "2030-01-01" }, "test", now);
-  moveTicket(cfg, "earlier", "shipped", "test", now, "Thread marked closed");
-  addTicket(cfg, { id: "later", title: "Publish guide", due: "2030-01-08" }, "test", now);
-  addTicket(cfg, { id: "nearest", title: "Draft guide", due: "2030-01-03", waitingOn: "waiting" }, "test", now);
+  addTicket(cfg, { id: "source", title: "Collect feedback" }, "test", now);
+  addTicket(cfg, { id: "draft", title: "Draft guide", estimate: 30, due: "2030-01-04", waitingOn: "source" }, "test", now);
+  addTicket(cfg, { id: "later", title: "Publish guide", due: "2030-01-05" }, "test", now);
   const state = await pass({ cfg, now, meters: async () => [] });
-  const goal = render(state, now).match(/<section class="goal"[\s\S]*?<\/section>/)?.[0];
-  expect(goal).toContain('<div class="days">2<small>days left</small>');
-  expect(goal).toContain("Draft guide");
-  expect(goal).toContain("not started · waiting on <b>Collect feedback</b>");
+  const html = render(state, now);
+  const row = html.match(/<tr role="row" class="row">[^]*?Draft guide[^]*?<\/tr>/)?.[0];
+  expect(row).toContain('class="dot soon"');
+  expect(row).toContain("not started");
+  expect(row).toContain("Fri · 3 days");
+  expect(row).toContain('class="waiting"><svg');
+  expect(row).toContain("Collect feedback");
+  expect(html.match(/Draft guide/g)).toHaveLength(1);
+  expect(html).toContain("Not started · 2");
+});
+
+test("failed in a row counts NOT DONE and unfinished attempts and resets after DONE", async () => {
+  const cfg = scratch(), now = Date.parse("2030-01-01T10:00:00Z");
+  addTicket(cfg, { id: "demo", title: "Check the index", stage: "building" }, "test", now - 60000);
+  const state = await pass({ cfg, now, meters: async () => [] });
+  const attempt = (id: number, outcome: Job["outcome"], achieved?: Job["achieved"]) => ({
+    id: String(id), ticket: "demo", kind: "build", name: "Check", event: outcome ? "ended" : "started", outcome, achieved,
+    started: new Date(now - 60000 + id * 1000).toISOString(), ended: outcome ? new Date(now - 50000 + id * 1000).toISOString() : null,
+  } as Job);
+  const older = attempt(1, "failed", null), oldRow = attempt(2, "stopped"), notDone = attempt(3, "finished", false);
+  const stopped = attempt(4, "stopped", null), capped = attempt(5, "capped", null), active = attempt(7, null);
+  const failures = (ledger: Job[]) => render(state, now, ledger).match(/class="failures">(.*?)<\/td>/)?.[1];
+  expect(failures([older, oldRow, notDone, stopped, capped, active])).toBe("3");
+  expect(failures([older, oldRow, notDone, stopped, capped, attempt(6, "finished", true), active])).toBe("");
+  expect(failures([notDone, attempt(4, "finished", null)])).toBe("");
+});
+
+test("the week starts at Monday midnight in the configured timezone", async () => {
+  const cfg = scratch({ timezone: "America/Los_Angeles" }), now = Date.parse("2030-01-07T08:30:00Z");
+  const first = Date.parse("2030-01-07T07:59:59Z"), monday = Date.parse("2030-01-07T08:00:00Z");
+  addTicket(cfg, { id: "old", title: "Previous shipment" }, "test", first - 1000);
+  moveTicket(cfg, "old", "shipped", "test", first, "Checked");
+  addTicket(cfg, { id: "new", title: "Current shipment" }, "test", first - 1000);
+  moveTicket(cfg, "new", "shipped", "test", monday, "Checked");
+  addTicket(cfg, { id: "due", title: "Imminent delivery", due: "2030-01-09" }, "test", first);
+  addTicket(cfg, { id: "queued", title: "Queued delivery" }, "test", first);
+  const state = await pass({ cfg, now, meters: async () => [] });
+  const html = render({ ...state, errors: ["Example watcher error"] }, now);
+  expect(html).toContain('<div class="week"><span>This week</span><span><b>1</b> shipped</span><span><b>1</b> in progress</span><span><b>1</b> not started</span>');
+  expect(html.indexOf("This week")).toBeGreaterThan(html.indexOf("Not started · 1"));
+  expect(html).not.toContain("Shipped this week");
+  expect(html).toContain("Shipped: Current shipment");
+  expect(html).not.toContain("Previous shipment");
 });
 
 // Rule: the costly model is used only when the coordinator asks for it; every other job gets the everyday one.

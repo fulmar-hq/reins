@@ -53,11 +53,12 @@ holding each job's `prompt.txt`, `log.txt` and `result.txt`.
 
 ## The page
 
-The header shows how many jobs are running and when the watcher last ran. The nearest open deadline and
-any open asks sit above **In progress**, which shows ticket pace, recent attempts and system problems.
-**Usage** shows current readings and forecasts. **Today** lists recent job, shipment and expiry events.
-**Next** shows the first five ready tickets. The page is bound to this computer only. To see it on a phone,
-put your own signed-in tunnel in front of it.
+**Needs you** shows open asks. **In progress and due soon** shows ticket pace, consecutive failed attempts, and
+system problems. Open tickets due within three days appear there, even if still ready. **Not started** lists
+the first five remaining ready tickets. **This week** counts shipments since Monday in the configured timezone,
+current work, queued tickets, and the optional backlog. **Usage** shows current readings, projections, and
+where you are in each period. **Today** lists recent job, shipment, and expiry events. The page binds to
+loopback. To see it on a phone, put your own signed-in tunnel in front of it.
 
 ## Tickets
 
@@ -69,12 +70,12 @@ ticket to its own tracker (an issue or pull request URL). Launching a build or f
 `--ticket <id>` moves it to `building`. Launching a review moves it to `in review`. Every move is recorded
 in `events.jsonl` with who made it and when.
 
-Ticket pace starts at the first job and pauses in `needs owner`. The estimate comes from
-`ticket.ts add --estimate <minutes>` or the median of at least three shipped tickets with job starts.
+Ticket pace starts at the first job and pauses in `needs owner`. Adding a ticket requires
+`ticket.ts add --estimate <minutes>`. Older tickets without estimates still show their due dates.
 Pace is on track through 100%, a little over through 150%, and very over after that.
 Use `--due YYYY-MM-DD` to show a due date. Ship with `ticket.ts move <id> shipped --proof "What was checked and where"`.
 Add `--waiting-on <id>` with `ticket.ts add`, or use `ticket.ts set <id> --waiting-on <id>|none` to update
-or clear the optional `waitingOn` reference. The page displays it on the deadline without changing queue order or stage.
+or clear the optional `waitingOn` reference. The page shows the referenced ticket beneath the ticket title in the main table.
 
 ## The alarms (all to the coordinator, all without tokens)
 
@@ -109,11 +110,14 @@ Investigation and specialist jobs linked to a ticket count as build attempts unl
 output and fresh (input minus cached plus output). Unknown counts are null.
 `outcome` is finished, stopped, capped or failed once the job ends, and `why` is the recorded reason.
 The reader derives purpose and outcome from the original kind and result for older jobs.
+The launcher asks for a final line of exactly `VERDICT: DONE` or `VERDICT: NOT DONE`.
+The attempt records `achieved` as true or false for these verdicts, or null when the verdict is missing or the job did not finish.
 
 ## Configuration
 
-Reins reads `reins.config.json` in the private folder. Set `REINS_PRIVATE_DIR` to use a different private folder
-or `REINS_CONFIG` to point directly to another config file. See `reins.config.example.json`.
+Reins looks for `reins.config.json` in `REINS_PRIVATE_DIR` by default. Set `REINS_CONFIG` to point directly
+to a config file. The config's folder holds the private records unless the file sets `privateDir`.
+Launched jobs do not inherit `REINS_PRIVATE_DIR` or `REINS_CONFIG`. See `reins.config.example.json`.
 The config sets which tools are enabled, their everyday model and effort, named **tiers** for other kinds of task (`hard`, `review`, `bulk`,
 `visual`; see "Choosing the model" in `COORDINATOR.md`) and extra arguments, the caps, the timezone, how the owner and coordinator are
 reached, `notify.live` (false means dry-run: nothing leaves this machine; the coordinator's wake file is still written), and optional **extra meters**: a name, a limit, a

@@ -34,6 +34,7 @@ if (import.meta.main) {
   let terms: string[] = [], found = 0;
   const file = loadConfig().privacyTermsFile; // a broken config stops the check rather than silently dropping your word list
   if (file) terms = readFileSync(file, "utf8").split("\n").map(t => t.trim().toLowerCase()).filter(Boolean);
+  if (!terms.length) console.error("WARNING: NO PRIVATE WORDS CONFIGURED. Only the built-in privacy rules will run.");
   const report = (where: string, text: string) => { for (const f of findings(text, terms)) { found++; console.log(`${where}  ${f.kind}: ${f.masked}`); } };
   /** Every added line of one patch, plus (for a commit) the message that precedes it. */
   const scan = (text: string, label: string) => {
