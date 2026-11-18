@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { enabledProviders, loadConfig, type Config } from "./config";
-import { KINDS, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, type Event, type Job, type Result, type Tokens } from "./lib";
+import { EXIT_NOTE, KINDS, NO_RESULT, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, slice, ticketAttempts, type Event, type Job, type Outcome, type Result, type Tokens } from "./lib";
 import { meterLine, readMeters, type Meter } from "./meters";
 import { legacyAsks, newsHealth, recordWake, reviewAsks, send, unansweredMinutes, type Message } from "./notify";
 import { PROVIDERS } from "./providers";
@@ -15,19 +15,32 @@ import { STAGES, byStage, readTickets, showMinutes, ticketTimings, type Ticket }
 export const MAIL_GAP_MS = 5 * 60000, METER_GAP_MS = 15 * 60000, STUCK_MS = 30 * 60000, OVERHEAD_SHARE = 0.15, OVERHEAD_FLOOR = 500_000;
 const minutesBetween = (from: number, to: number) => Math.round((to - from) / 6000) / 10;
 
-export type Facts = { alive: boolean; pidInUse: boolean; finishedAt: number; lastGrowth: number; tokens: Tokens | null };
+export type Facts = { alive: boolean; pidInUse: boolean; finishedAt: number; lastGrowth: number; tokens: Tokens | null; exit?: number | "signal" };
 /** Decide a running job's fate from observed facts. null means leave it running. */
-export function judge(job: Job, f: Facts, now: number, silentMinutes: number): { result: Result; reason: string } | null {
+export function judge(job: Job, f: Facts, now: number, silentMinutes: number): { result: Result; outcome: Outcome; reason: string } | null {
   const minutes = (now - Date.parse(job.started)) / 60000;
-  if (!f.alive && f.finishedAt) return { result: "finished", reason: "result written" };
+  if (!f.alive && typeof f.exit === "number" && f.exit !== 0)
+    return { result: "failed", outcome: "failed", reason: `the job exited with status ${f.exit}; see its log` };
+  if (!f.alive && f.exit === "signal") return { result: "stopped", outcome: "stopped", reason: "the job was killed" };
+  if (!f.alive && f.finishedAt && (f.exit === 0 || job.outcome === undefined))
+    return { result: "finished", outcome: "finished", reason: "result written" };
   // The recorded number now belongs to a process we cannot confirm as this job: signal nothing, say so.
-  if (!f.alive && f.pidInUse) return { result: "ended-unconfirmed", reason: "its process could not be confirmed as this job, so nothing was signalled; check the run folder and any leftover processes by hand" };
-  if (!f.alive) return { result: "failed", reason: "the job ended without a result" };
-  if (f.finishedAt && now - f.finishedAt > 60000) return { result: "finished", reason: "result written; lingering process stopped" };
-  if (minutes > job.capMinutes) return { result: "stopped-cap", reason: `ran past its ${job.capMinutes}-minute cap` };
-  if (f.tokens?.fresh != null && f.tokens.fresh > job.capTokens) return { result: "stopped-cap", reason: `used ${count(f.tokens.fresh)} tokens, past its ${count(job.capTokens)} cap` };
-  if (now - f.lastGrowth > silentMinutes * 60000) return { result: "stopped-silent", reason: `wrote nothing for ${silentMinutes} minutes` };
+  if (!f.alive && f.pidInUse && f.exit === undefined) return { result: "ended-unconfirmed", outcome: "stopped", reason: "its process could not be confirmed as this job, so nothing was signalled; check the run folder and any leftover processes by hand" };
+  if (!f.alive) return { result: "stopped", outcome: "stopped", reason: NO_RESULT };
+  if (f.finishedAt && now - f.finishedAt > 60000) return { result: "finished", outcome: "finished", reason: "result written; lingering process stopped" };
+  if (minutes > job.capMinutes) return { result: "stopped-cap", outcome: "capped", reason: `ran past its ${job.capMinutes}-minute cap` };
+  if (f.tokens?.fresh != null && f.tokens.fresh > job.capTokens) return { result: "stopped-cap", outcome: "capped", reason: `used ${count(f.tokens.fresh)} tokens, past its ${count(job.capTokens)} cap` };
+  if (now - f.lastGrowth > silentMinutes * 60000) return { result: "stopped-silent", outcome: "stopped", reason: `wrote nothing for ${silentMinutes} minutes` };
   return null;
+}
+function harnessExit(dir: string) {
+  try {
+    const line = slice(join(dir, "log.txt"), 128, "end").trimEnd().split("\n").at(-1)!;
+    if (!line.startsWith(EXIT_NOTE)) return;
+    const status = line.slice(EXIT_NOTE.length);
+    if (status === "signal") return status;
+    if (/^\d+$/.test(status)) return Number(status);
+  } catch { /* old or missing log */ }
 }
 /** True only while the recorded process is still this job: same pid, same start time, leading its own group. */
 const alive = (job: Job) => isOurLeader(job.pid, job.pidStarted);
@@ -96,13 +109,14 @@ export async function pass(o: Options = {}) {
   for (const job of jobs(f.ledger).filter(j => j.event === "started")) {
     const provider = PROVIDERS[job.provider], started = Date.parse(job.started), facts = provider.facts(job.dir, started);
     const finishedAt = provider.finished(job.dir) ? statSync(join(job.dir, "result.txt")).mtimeMs : 0;
-    const verdict = judge(job, { alive: alive(job), pidInUse: processStarted(job.pid) !== "", finishedAt, ...facts }, now, cfg.caps.silentMinutes);
+    const verdict = judge(job, { alive: alive(job), pidInUse: processStarted(job.pid) !== "", finishedAt, exit: harnessExit(job.dir), ...facts }, now, cfg.caps.silentMinutes);
     if (!verdict) { running.push({ ...job, tokens: facts.tokens, minutesSoFar: minutesBetween(started, now) }); continue; }
     stop(job);
     const tokens = provider.facts(job.dir, started).tokens, minutes = minutesBetween(started, now);
     appendLine(f.ledger, { ...job, event: "ended", ended: new Date(now).toISOString(), minutes, tokens, ...verdict } satisfies Job);
     const used = `${minutes} min, ${count(tokens?.fresh)} tokens`;
-    emit(`job:${job.id}`, verdict.result, verdict.result === "finished" ? `Finished: ${job.name} (${used}).` : `Stopped: ${job.name}, ${verdict.reason} (${used}).`, { dir: job.dir });
+    const summary = verdict.outcome === "failed" ? "Failed" : "Stopped";
+    emit(`job:${job.id}`, verdict.result, verdict.outcome === "finished" ? `Finished: ${job.name} (${used}).` : `${summary}: ${job.name}, ${verdict.reason} (${used}).`, { dir: job.dir });
   }
 
   // 2. Meters, refreshed every 15 minutes; between refreshes the last reading stands.
@@ -121,7 +135,7 @@ export async function pass(o: Options = {}) {
     const endsAt = Number.isFinite(made) ? made + e.hours * 3600000 : null, paused = Boolean(e.pausedFile && existsSync(e.pausedFile));
     if (endsAt && !paused && endsAt > now && endsAt - now <= 3 * 3600000)
       emit(`expiry:${e.name}:${endsAt}`, "expiry", `${e.name} ends ${time.at(endsAt)}; only the owner can renew it.`);
-    return { name: e.name, endsAt, paused };
+    return { name: e.name, endsAt, renewedAt: endsAt === null ? null : made, paused };
   });
 
   // 3. Today in the configured timezone: finished work, the usage split, tickets, idleness.
@@ -142,7 +156,7 @@ export async function pass(o: Options = {}) {
   const ready = byStage(tickets, "ready"), idleSince: number | null = !running.length && ready.length ? previous.idleSince ?? now : null;
   if (idleSince) emit(`idle:${idleSince}`, "idle", `Nothing is running and ${ready.length} ticket${ready.length > 1 ? "s are" : " is"} ready, first: ${ready[0]!.title}.`);
   const ticketRows = tickets.map(t => {
-    const mine = all.filter(j => j.ticket === t.id), job = running.find(j => j.ticket === t.id);
+    const mine = ticketAttempts(t.id, all), job = running.find(j => j.ticket === t.id);
     const lastTouched = Math.max(Date.parse(t.updated), ...mine.map(j => Date.parse(j.ended ?? j.started)));
     if ((t.stage === "building" || t.stage === "in review") && !job && now - lastTouched >= STUCK_MS)
       emit(`stuck:${t.id}:${lastTouched}`, "stuck", `"${t.title}" is ${t.stage} but no job has run on it for ${Math.round((now - lastTouched) / 60000)} minutes.`);

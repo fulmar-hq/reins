@@ -1,19 +1,20 @@
 #!/usr/bin/env bun
 // The tickets file and the coordinator's one-line commands for it. Only the coordinator writes it.
-//   bun ticket.ts add --id 12 --title "Plain words" [--estimate minutes] [--due YYYY-MM-DD]
+//   bun ticket.ts add --id 12 --title "Plain words" [--estimate minutes] [--due YYYY-MM-DD] [--waiting-on id]
+//   bun ticket.ts set 12 --waiting-on <id|none>      bun ticket.ts history 12
 //   bun ticket.ts move 12 in review [--by name]      bun ticket.ts order 14 12 13      bun ticket.ts list
 //   bun ticket.ts move 12 shipped --proof "What was checked and where"
 //   bun ticket.ts ack     "I have seen the events so far" (any other command here also counts)
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config";
-import { appendLine, files, withLock, type Event, type Job } from "./lib";
+import { appendLine, files, jobs, ticketAttempts, withLock, type Event, type Job } from "./lib";
 
 export const STAGES = ["ready", "building", "in review", "needs owner", "shipped"] as const;
 export type Stage = (typeof STAGES)[number];
 export type Ticket = {
   id: string; title: string; stage: Stage; order: number; link?: string; updated: string;
-  estimate?: number; due?: string; shipment?: { proof: string };
+  estimate?: number; due?: string; waitingOn?: string; shipment?: { proof: string };
   /** The four-part brief a builder is launched with. */
   brief: { job: string; doneMeans: string; whereToLook: string; check: string };
 };
@@ -32,6 +33,11 @@ function save(cfg: Config, tickets: Ticket[], note: string, by: string, now: num
   // The record of who moved what, when. Quiet: the coordinator is not woken about its own moves.
   appendLine(files(cfg).events, { key: `ticket:${now}:${note}`, at: new Date(now).toISOString(), type: "ticket", text: `${by} ${note}`, quiet: true, ...stageEvent } satisfies Event);
 }
+function ticketById(tickets: Ticket[], id: string) {
+  const ticket = tickets.find(t => t.id === id);
+  if (!ticket) throw Error(`There is no ticket ${id}.`);
+  return ticket;
+}
 export function addTicket(cfg: Config, t: Partial<Ticket> & { id: string; title: string }, by = "coordinator", now = Date.now()) {
   const stage = t.stage ?? "ready";
   if (!STAGES.includes(stage)) throw Error(`A stage is one of: ${STAGES.join(", ")}.`);
@@ -43,10 +49,19 @@ export function addTicket(cfg: Config, t: Partial<Ticket> & { id: string; title:
   withLock(files(cfg).lock, () => {
     const tickets = readTickets(cfg);
     if (tickets.some(x => x.id === t.id)) throw Error(`Ticket ${t.id} already exists.`);
+    if (t.waitingOn !== undefined) ticketById(tickets, t.waitingOn);
     tickets.push({ id: t.id, title: t.title, stage, order: Math.max(0, ...tickets.map(x => x.order)) + 1, link: t.link, updated: new Date(now).toISOString(),
-      estimate: t.estimate, due: t.due,
+      estimate: t.estimate, due: t.due, waitingOn: t.waitingOn,
       brief: { job: "", doneMeans: "", whereToLook: "", check: "", ...t.brief } });
     save(cfg, tickets, `added "${t.title}" as ${stage}`, by, now, { ticket: t.id, stage });
+  });
+}
+function setWaitingOn(cfg: Config, id: string, waitingOn: string, by = "coordinator", now = Date.now()) {
+  withLock(files(cfg).lock, () => {
+    const tickets = readTickets(cfg), ticket = ticketById(tickets, id);
+    if (waitingOn === "none") delete ticket.waitingOn;
+    else ticket.waitingOn = ticketById(tickets, waitingOn).id;
+    save(cfg, tickets, `set waiting-on for "${ticket.title}" to ${waitingOn}`, by, now);
   });
 }
 export function moveTicket(cfg: Config, id: string, stage: Stage, by = "coordinator", now = Date.now(), proof?: string) {
@@ -57,8 +72,7 @@ export function moveTicket(cfg: Config, id: string, stage: Stage, by = "coordina
 export function moveTicketLocked(cfg: Config, id: string, stage: Stage, by: string, now: number, proof?: string) {
   if (!STAGES.includes(stage)) throw Error(`A stage is one of: ${STAGES.join(", ")}.`);
   if (stage === "shipped" && !proof?.trim()) throw Error('Shipping needs --proof "What was checked and where".');
-  const tickets = readTickets(cfg), ticket = tickets.find(t => t.id === id);
-  if (!ticket) throw Error(`There is no ticket ${id}.`);
+  const tickets = readTickets(cfg), ticket = ticketById(tickets, id);
   const from = ticket.stage;
   if (from === stage) return;
   if (stage === "shipped") ticket.shipment = { proof: proof!.trim() };
@@ -119,7 +133,7 @@ if (import.meta.main) {
     const i = rest.indexOf(name);
     if (i < 0) return;
     const value = rest[i + 1];
-    if (value === undefined || (["--estimate", "--due", "--proof"].includes(name) && value.startsWith("--")))
+    if (value === undefined || (["--estimate", "--due", "--proof", "--waiting-on"].includes(name) && value.startsWith("--")))
       throw Error(`Give a value after ${name}.`);
     rest.splice(i, 2);
     return value;
@@ -130,14 +144,29 @@ if (import.meta.main) {
       const id = flag("--id"), title = flag("--title"), estimate = flag("--estimate"), due = flag("--due");
       if (!id || !title) throw Error("add needs --id and --title");
       addTicket(cfg, { id, title, stage: flag("--stage") as Stage | undefined, link: flag("--link"),
-        estimate: estimate === undefined ? undefined : Number(estimate), due,
+        estimate: estimate === undefined ? undefined : Number(estimate), due, waitingOn: flag("--waiting-on"),
         brief: { job: flag("--job") ?? "", doneMeans: flag("--done") ?? "", whereToLook: flag("--where") ?? "", check: flag("--check") ?? "" } }, by);
+    } else if (verb === "set") {
+      const waitingOn = flag("--waiting-on");
+      if (rest.length !== 1 || !waitingOn) throw Error("set needs a ticket id and --waiting-on <id|none>");
+      setWaitingOn(cfg, rest[0]!, waitingOn, by);
+    } else if (verb === "history") {
+      if (rest.length !== 1) throw Error("history needs a ticket id");
+      const ticket = ticketById(readTickets(cfg), rest[0]!);
+      for (const attempt of ticketAttempts(ticket.id, jobs(files(cfg).ledger))) console.log(JSON.stringify(attempt));
+      process.exit(0);
     } else if (verb === "move") {
       const proof = flag("--proof");
       moveTicket(cfg, rest[0] ?? "", rest.slice(1).join(" ") as Stage, by, Date.now(), proof);
     } else if (verb === "order") orderTickets(cfg, rest, by);
     else if (verb === "ack") appendLine(files(cfg).events, { key: `ack:${Date.now()}`, at: new Date().toISOString(), type: "ack", text: `${by ?? "coordinator"} acknowledged the events so far`, quiet: true } satisfies Event);
-    else if (verb !== "list") throw Error("usage: ticket.ts add|move|order|ack|list (see the top of ticket.ts)");
-    for (const stage of STAGES) for (const t of byStage(readTickets(cfg), stage)) console.log(`${stage.padEnd(12)} ${t.id.padEnd(8)} ${t.title}`);
+    else if (verb !== "list") throw Error("usage: ticket.ts add|set|move|order|ack|list|history (see the top of ticket.ts)");
+    const tickets = readTickets(cfg), ledger = jobs(files(cfg).ledger);
+    for (const stage of STAGES) for (const t of byStage(tickets, stage)) {
+      const attempts = ticketAttempts(t.id, ledger), retries = attempts.filter(a => a.purpose === "retry").length;
+      console.log(`${stage.padEnd(12)} ${t.id.padEnd(8)} ${t.title}`
+        + (attempts.length ? ` · ${attempts.length} attempt${attempts.length === 1 ? "" : "s"}` : "")
+        + (retries ? `, ${retries} retr${retries === 1 ? "y" : "ies"}` : ""));
+    }
   } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); }
 }

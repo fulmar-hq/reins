@@ -3,15 +3,21 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSyn
 import { dirname, join } from "node:path";
 import type { Config, ProviderName } from "./config";
 
-export const KINDS = ["build", "review", "investigation", "specialist"] as const;
+export const KINDS = ["build", "review", "fix", "investigation", "specialist"] as const;
 export type Kind = (typeof KINDS)[number];
+export type Purpose = "build" | "review" | "fix" | "retry";
+export type Outcome = "finished" | "stopped" | "capped" | "failed";
+export const purposeForKind = (kind: Kind): Purpose => kind === "review" || kind === "fix" ? kind : "build";
+export const NO_RESULT = "the job ended without a result";
+export const EXIT_NOTE = "Reins harness exit: ";
 /** ended-unconfirmed: the job's process could not be confirmed as ours, so nothing was signalled. */
-export type Result = "finished" | "stopped-cap" | "stopped-silent" | "failed" | "ended-unconfirmed";
+export type Result = "finished" | "stopped-cap" | "stopped-silent" | "stopped" | "failed" | "ended-unconfirmed";
 /** Real counts only, null when not knowable. `fresh` = input - cached + output, the part that is not a cache re-read. */
 export type Tokens = { input: number | null; cached: number | null; output: number | null; fresh: number | null };
 export type Job = {
   event: "started" | "ended"; id: string; name: string; kind: Kind; provider: ProviderName; model?: string | null; effort?: string | null; ticket: string | null;
   started: string; ended: string | null; minutes: number | null; tokens: Tokens | null;
+  purpose?: Purpose; retryOf?: string | null; outcome?: Outcome | null;
   result: Result | null; reason: string | null; dir: string; pid: number; pidStarted: string; capMinutes: number; capTokens: number;
 };
 export type Ask = { question: string; recommendation: string; reason: string; fallback: { at: number; action: string } | null };
@@ -41,6 +47,23 @@ export function jobs(ledger: string): Job[] {
   const byId = new Map<string, Job>();
   for (const line of readLines<Job>(ledger)) if (line?.id) byId.set(line.id, line);
   return [...byId.values()];
+}
+
+export function ticketAttempts(id: string, ledger: readonly Job[]) {
+  return ledger.filter(j => j.ticket === id).sort((a, b) => Date.parse(a.started) - Date.parse(b.started)).map(j => ({
+    id: j.id, name: j.name, purpose: j.purpose ?? purposeForKind(j.kind), retryOf: j.retryOf ?? null,
+    started: j.started, ended: j.ended, minutes: j.minutes, tokens: j.tokens,
+    outcome: jobOutcome(j),
+    why: j.reason,
+  }));
+}
+
+export function jobOutcome(j: Job): Outcome | null {
+  if (j.event !== "ended") return null;
+  if (j.outcome) return j.outcome;
+  if (j.result === "finished") return "finished";
+  if (j.result === "stopped-cap") return "capped";
+  return j.result === "failed" && j.reason !== NO_RESULT ? "failed" : "stopped";
 }
 
 export const mtime = (path: string) => { try { return statSync(path).mtimeMs; } catch { return 0; } };

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config";
 import { spawn } from "node:child_process";
-import { files, jobs, pace, processStarted, readLines, withLock, type Event, type Job } from "./lib";
+import { appendLine, files, jobs, pace, processStarted, readLines, ticketAttempts, withLock, type Event, type Job } from "./lib";
 import { send, takeNews, textOwner, updateAsk } from "./notify";
 import { render } from "./page";
 import { launch, plan } from "./run";
@@ -30,7 +30,7 @@ test("a job over its cap is stopped and the ledger says why", async () => {
   await pass({ cfg, now: Date.now() + 2 * 60000, meters: async () => [] });
   for (let i = 0; i < 20 && running(); i++) await Bun.sleep(50); // the kernel reaps the group a moment after the signal
   expect(running()).toBe(false);
-  expect(jobs(files(cfg).ledger)[0]).toMatchObject({ event: "ended", result: "stopped-cap", tokens: null, dir: job.dir });
+  expect(jobs(files(cfg).ledger)[0]).toMatchObject({ event: "ended", result: "stopped-cap", outcome: "capped", tokens: null, dir: job.dir });
   expect(readLines<Event>(files(cfg).events).map(e => e.type)).toEqual(["stopped-cap", "wake"]); // one event, one wake
 });
 
@@ -194,11 +194,58 @@ test("waiting news is reported until the coordinator takes it", async () => {
   const now = Date.now(), watch = (minutes: number) => pass({ cfg, now: now + minutes * 60000, meters: async () => [] });
   expect((await watch(1)).wakeWarning).toBeNull();
   const state = await watch(3);
-  expect(render(state)).toContain('<span class="bad">News has been waiting 3 minutes; nobody is listening: start bun wait.ts</span>');
+  expect(render(state, state.at)).toContain('<span class="why">News has been waiting 3 minutes; nobody is listening: start bun wait.ts</span>');
   expect(takeNews(cfg, () => {})).toBe(true);
   const next = await watch(4);
   expect(next.wakeWarning).toBeNull();
   expect(next.lastTaken).toBeGreaterThanOrEqual(now);
+});
+
+test("ticket attempts preserve launch order, retry links and older ledger outcomes", () => {
+  const ledger = files(scratch()).ledger, started = "2030-01-01T09:00:00Z", ended = "2030-01-01T09:10:00Z";
+  appendLine(ledger, { event: "started", id: "first", name: "First pass", kind: "build", ticket: "demo", started });
+  appendLine(ledger, { event: "ended", id: "second", name: "Second pass", kind: "review", ticket: "demo",
+    started: ended, ended: "2030-01-01T09:20:00Z", minutes: 10, tokens: null, purpose: "retry", retryOf: "first", outcome: "finished", reason: "result written" });
+  appendLine(ledger, { event: "ended", id: "first", name: "First pass", kind: "build", ticket: "demo", started, ended,
+    minutes: 10, tokens: null, result: "stopped-cap", reason: "minute cap reached" });
+  appendLine(ledger, { event: "ended", id: "other", ticket: "other", started, ended, result: "finished" });
+  const attempts = ticketAttempts("demo", jobs(ledger));
+  expect(attempts.map(({ id, purpose, outcome, retryOf, why }) => ({ id, purpose, outcome, retryOf, why }))).toEqual([
+    { id: "first", purpose: "build", outcome: "capped", retryOf: null, why: "minute cap reached" },
+    { id: "second", purpose: "retry", outcome: "finished", retryOf: "first", why: "result written" },
+  ]);
+});
+
+test("a very over ticket is stuck unless a job is running on it", async () => {
+  const cfg = scratch(), now = Date.parse("2030-01-01T10:00:00Z"), started = new Date(now - 60 * 60000).toISOString();
+  addTicket(cfg, { id: "demo", title: "Trace a route", stage: "building", estimate: 20 }, "test", Date.parse(started));
+  const job = { event: "ended", id: "first", ticket: "demo", kind: "build", name: "Check route", started,
+    ended: new Date(now - 60000).toISOString(), result: "stopped-cap", reason: "minute cap reached" } as Job;
+  appendLine(files(cfg).ledger, job);
+  const state = await pass({ cfg, now, meters: async () => [] });
+  expect(render(state, now, [job])).toContain('class="sr-only">Late and stuck. </span>Trace a route');
+  const running = { ...job, model: null, effort: null, id: "second", started: new Date(now - 60000).toISOString(), ended: null, minutes: 1,
+    event: "started", result: null, reason: null } as const;
+  expect(render({ ...state, running: [running] }, now, [job, running])).toContain('class="sr-only">Late but moving. </span>Trace a route');
+});
+
+test("Needs you is absent with no open asks", async () => {
+  const now = Date.parse("2030-01-01T10:00:00Z"), state = await pass({ cfg: scratch(), now, meters: async () => [] });
+  expect(render(state, now)).not.toContain("Needs you");
+});
+
+test("the deadline shows the nearest open due ticket and what it waits on", async () => {
+  const cfg = scratch(), now = Date.parse("2030-01-01T10:00:00Z");
+  addTicket(cfg, { id: "waiting", title: "Collect feedback" }, "test", now);
+  addTicket(cfg, { id: "earlier", title: "Close old thread", due: "2030-01-01" }, "test", now);
+  moveTicket(cfg, "earlier", "shipped", "test", now, "Thread marked closed");
+  addTicket(cfg, { id: "later", title: "Publish guide", due: "2030-01-08" }, "test", now);
+  addTicket(cfg, { id: "nearest", title: "Draft guide", due: "2030-01-03", waitingOn: "waiting" }, "test", now);
+  const state = await pass({ cfg, now, meters: async () => [] });
+  const goal = render(state, now).match(/<section class="goal"[\s\S]*?<\/section>/)?.[0];
+  expect(goal).toContain('<div class="days">2<small>days left</small>');
+  expect(goal).toContain("Draft guide");
+  expect(goal).toContain("not started · waiting on <b>Collect feedback</b>");
 });
 
 // Rule: the costly model is used only when the coordinator asks for it; every other job gets the everyday one.

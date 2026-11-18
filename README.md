@@ -53,27 +53,28 @@ holding each job's `prompt.txt`, `log.txt` and `result.txt`.
 
 ## The page
 
-The page shows **Needs you** (open asks), **Running now** (model and effort when recorded, minutes and tokens
-against the caps), **Tickets** by stage, **Shipped today** (model and effort when recorded, tokens, and today's usage
-split), **Meters** (usage, forecast when available, reset and pace), **Notes** (state-of-play notes and defaults
-due or taken) and **Health** (when the
-watcher last ran, when the coordinator last acted, whether sending is live). It is bound to this computer only;
-to see it on a phone, put your own signed-in tunnel in front of it.
+The header shows how many jobs are running and when the watcher last ran. The nearest open deadline and
+any open asks sit above **In progress**, which shows ticket pace, recent attempts and system problems.
+**Usage** shows current readings and forecasts. **Today** lists recent job, shipment and expiry events.
+**Next** shows the first five ready tickets. The page is bound to this computer only. To see it on a phone,
+put your own signed-in tunnel in front of it.
 
 ## Tickets
 
 `tickets.json` is `{"tickets": [...]}`. The owner and coordinator agree tickets in chat; only the coordinator
-writes the file, with `bun ticket.ts add|move|order|list`. Each ticket has `id`, `title` (plain words),
+writes the file, with `bun ticket.ts add|set|move|order|list`. Each ticket has `id`, `title` (plain words),
 `stage` (`ready`, `building`, `in review`, `needs owner`, `shipped`), `order` (within ready), an optional `link`,
 `updated`, and a four-part `brief`: `job`, `doneMeans`, `whereToLook`, `check`. The `link` is how a team ties a
-ticket to its own tracker (an issue or pull request URL); nothing here polls that tracker. Launching a job with
-`--ticket <id>` moves the ticket to `building`; nothing else moves a ticket automatically. Every move is recorded
+ticket to its own tracker (an issue or pull request URL). Launching a build or fix with
+`--ticket <id>` moves it to `building`. Launching a review moves it to `in review`. Every move is recorded
 in `events.jsonl` with who made it and when.
 
 Ticket pace starts at the first job and pauses in `needs owner`. The estimate comes from
 `ticket.ts add --estimate <minutes>` or the median of at least three shipped tickets with job starts.
 Pace is on track through 100%, a little over through 150%, and very over after that.
 Use `--due YYYY-MM-DD` to show a due date. Ship with `ticket.ts move <id> shipped --proof "What was checked and where"`.
+Add `--waiting-on <id>` with `ticket.ts add`, or use `ticket.ts set <id> --waiting-on <id>|none` to update
+or clear the optional `waitingOn` reference. The page displays it on the deadline without changing queue order or stage.
 
 ## The alarms (all to the coordinator, all without tokens)
 
@@ -92,19 +93,22 @@ taken with `notify-owner.ts --resolved <id> "<action taken>"`. The watcher also 
 ask after two days and drops it if it is not reconfirmed within a day. The coordinator records the owner's answer by ask ID. See [the coordinator's commands](COORDINATOR.md#when-to-text-the-owner).
 
 At most 4 texts in any 24 hours by default. After that the ask still appears on the page and the coordinator
-is told the text was held. Channels are Telegram (Bot API) or any command. Coordinator silence appears in Health.
+is told the text was held. Channels are Telegram (Bot API) or any command. Unanswered wakes appear in **In progress**.
 
-On upgrade, existing `needs owner` tickets stay in their ticket stage. Pending free-text asks and old
-`## Needs you` bullets in `state-of-play.md` remain visible. Resolve a free-text ask by its ID and remove
-old bullets once addressed. Move useful background into `## Notes`.
+Pending free-text asks remain visible. Resolve a free-text ask by its ID. Old `## Needs you` bullets
+remain in `state-of-play.md` for the coordinator to review.
 
 ## The ledger
 
-`ledger.jsonl` has one line when a job starts and one when it ends: id, name, kind, tool, ticket, started, ended,
-minutes, tokens (input, cached, output, and fresh = input - cached + output), result (`finished`, `stopped-cap`,
-`stopped-silent`, `failed`, or `ended-unconfirmed` when the job's process could not be confirmed as ours and so
-nothing was signalled) and the run folder. Token counts are read from the tool's own records; a count that
-cannot be read is `null`, never a guess.
+`ledger.jsonl` stores every job start and end. `bun ticket.ts list` shows attempt counts and
+`bun ticket.ts history <id>` outputs one attempt per line, in launch order, from the same ledger.
+Each attempt has an `id` and `name` (the job's identifier and label), a `purpose` (build, review, fix
+or retry), and `retryOf` (the earlier job ID when launched with `--retry-of <job id or run folder name>`).
+Investigation and specialist jobs linked to a ticket count as build attempts unless launched as retries.
+`started` and `ended` are timestamps. `minutes` is the elapsed time and `tokens` records input, cached,
+output and fresh (input minus cached plus output). Unknown counts are null.
+`outcome` is finished, stopped, capped or failed once the job ends, and `why` is the recorded reason.
+The reader derives purpose and outcome from the original kind and result for older jobs.
 
 ## Configuration
 
