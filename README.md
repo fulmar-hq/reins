@@ -55,7 +55,7 @@ holding each job's `prompt.txt`, `log.txt` and `result.txt`.
 
 **Needs you** shows open asks. **In progress and due soon** shows ticket pace, consecutive failed attempts, and
 system problems. Open tickets due within three days appear there, even if still ready. **Not started** lists
-the first five remaining ready tickets. **This week** counts shipments since Monday in the configured timezone,
+the first three remaining ready tickets, then "and N more". **This week** counts shipments since Monday in the configured timezone,
 current work, queued tickets, and the optional backlog. **Usage** shows current readings, projections, and
 where you are in each period. **Today** lists recent job, shipment, and expiry events. The page binds to
 loopback. To see it on a phone, put your own signed-in tunnel in front of it.
