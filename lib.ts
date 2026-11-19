@@ -84,7 +84,7 @@ export async function exec(argv: string[], options: { cwd?: string; timeoutMs?: 
   return out;
 }
 type Row = { pid: number; pgid: number; stat: string; started: string };
-const processes = (): Row[] => Bun.spawnSync(["ps", "-A", "-o", "pid=,pgid=,stat=,lstart="]).stdout.toString().split("\n").flatMap(line => {
+const processes = (env = process.env): Row[] => Bun.spawnSync(["ps", "-A", "-o", "pid=,pgid=,stat=,lstart="], { env }).stdout.toString().split("\n").flatMap(line => {
   const [pid, pgid, stat = "", ...started] = line.trim().split(/\s+/);
   return pid ? [{ pid: Number(pid), pgid: Number(pgid), stat, started: started.join(" ") }] : [];
 });
@@ -98,6 +98,8 @@ export function isOurLeader(pid: number, started: string): boolean {
   const same = liveProcess(pid);
   return Boolean(same) && started !== "" && same!.started === started && same!.pgid === pid;
 }
+const lockProcesses = () => processes({ ...process.env, TZ: "UTC", LC_ALL: "C" });
+const lockStartPrefix = "UTC:";
 let lockOwnerStarted: string | undefined;
 
 function clearDeadLock(path: string) {
@@ -111,8 +113,10 @@ function clearDeadLock(path: string) {
       let dead = false;
       try { process.kill(pid, 0); } catch (error) { dead = (error as NodeJS.ErrnoException).code === "ESRCH"; }
       if (!dead) {
-        const current = processes().find(p => p.pid === pid);
-        dead = !!current && (current.stat.startsWith("Z") || !!started && current.started !== "" && current.started !== started);
+        const current = lockProcesses().find(p => p.pid === pid);
+        // Older markers used local time, so their timestamps cannot prove that a live PID was reused.
+        dead = !!current && (current.stat.startsWith("Z")
+          || started.startsWith(lockStartPrefix) && current.started !== "" && lockStartPrefix + current.started !== started);
       }
       if (!dead) return;
       // Only the contender that removes this owner's unique marker may clear its folder.
@@ -131,7 +135,8 @@ export function tryLock(path: string): (() => void) | undefined {
   const marker = join(pending, owner);
   try {
     // Publish a populated folder atomically. A concurrent owner's nonempty folder cannot be replaced.
-    writeFileSync(marker, lockOwnerStarted ??= processStarted(process.pid));
+    lockOwnerStarted ??= lockProcesses().find(p => p.pid === process.pid)?.started ?? "";
+    writeFileSync(marker, lockOwnerStarted ? lockStartPrefix + lockOwnerStarted : "");
     renameSync(pending, path);
   } catch (error) {
     if (existsSync(marker)) unlinkSync(marker);

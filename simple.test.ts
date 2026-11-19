@@ -258,7 +258,7 @@ test("a pass finishing after its successor preserves the newer state and alarms"
   }
 });
 
-test("a lock can be recovered while its exited owner is still unreaped", async () => {
+test("a lock survives a different timezone and can be recovered while its exited owner is unreaped", async () => {
   const cfg = scratch(), lock = files(cfg).passLock, pidFile = join(cfg.privateDir, "child-pid");
   const parent = Bun.spawn(["python3", "-c", [
     "import os, sys",
@@ -268,17 +268,30 @@ test("a lock can be recovered while its exited owner is still unreaped", async (
     "with open(sys.argv[-1], 'w') as f:",
     "    f.write(str(pid))",
     "sys.stdin.read()",
+    "try: os.kill(pid, 9)",
+    "except ProcessLookupError: pass",
     "os.waitpid(pid, 0)",
   ].join("\n"), process.execPath, "--no-env-file", "-e",
-  'import { tryLock } from "./lib"; if (!tryLock(process.argv[1]!)) process.exit(1);',
-  lock, pidFile], { cwd: import.meta.dir, stdin: "pipe", stdout: "ignore", stderr: "inherit" });
+  'import { tryLock } from "./lib"; if (!tryLock(process.argv[1]!)) process.exit(1); setInterval(() => {}, 1000);',
+  lock, pidFile], { cwd: import.meta.dir, env: { ...process.env, TZ: "Pacific/Honolulu" }, stdin: "pipe", stdout: "ignore", stderr: "inherit" });
   try {
+    let pid = "";
+    for (let i = 0; i < 100 && !(pid && existsSync(lock)); i++) {
+      await Bun.sleep(20);
+      if (existsSync(pidFile)) pid = readFileSync(pidFile, "utf8");
+    }
+    expect(pid).toMatch(/^\d+$/);
+    expect(existsSync(lock)).toBe(true);
+    const contender = Bun.spawnSync([process.execPath, "--no-env-file", "-e",
+      'import { tryLock } from "./lib"; if (tryLock(process.argv[1]!)) process.exit(1);', lock],
+    { cwd: import.meta.dir, env: { ...process.env, TZ: "UTC" } });
+    expect(contender.exitCode).toBe(0);
+
+    process.kill(Number(pid), "SIGKILL");
     let state = "";
     for (let i = 0; i < 100 && !state.startsWith("Z"); i++) {
       await Bun.sleep(20);
-      if (!existsSync(pidFile)) continue;
-      const pid = readFileSync(pidFile, "utf8");
-      if (pid) state = Bun.spawnSync(["ps", "-p", pid, "-o", "stat="]).stdout.toString().trim();
+      state = Bun.spawnSync(["ps", "-p", pid, "-o", "stat="]).stdout.toString().trim();
     }
     expect(state).toMatch(/^Z/);
     expect(existsSync(lock)).toBe(true);
