@@ -10,6 +10,7 @@ import { enabledProviders, loadConfig, type Config, type ProviderName } from "./
 import { EXIT_NOTE, KINDS, appendLine, files, jobs, processStarted, purposeForKind, withLock, type Job, type Kind } from "./lib";
 import { PROVIDERS } from "./providers";
 import { moveTicketLocked, readTickets } from "./ticket";
+import { workFolder } from "./tidy";
 import { stopRedirected } from "./watch";
 
 export type Launch = {
@@ -63,6 +64,7 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
   const { provider, argv, prompt, model, effort } = plan(cfg, o, dir);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "prompt.txt"), prompt, { mode: 0o600, flag: "wx" });
+  const cwd = cfg.workRoots.length ? workFolder(cfg, resolve(o.cwd)) ?? null : undefined;
   const log = openSync(join(dir, "log.txt"), "ax");
   // `detached` gives the job its own process group, which is what the watcher stops.
   const env = { ...process.env };
@@ -76,7 +78,7 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
   } finally { closeSync(log); }
   child.unref();
   const job: Job = {
-    event: "started", id: `${day}-${time}-${slug}-${crypto.randomUUID().slice(0, 8)}`, name: o.name.trim(), kind: o.kind, provider, model, effort, ticket: o.ticket ?? null,
+    event: "started", cwd, id: `${day}-${time}-${slug}-${crypto.randomUUID().slice(0, 8)}`, name: o.name.trim(), kind: o.kind, provider, model, effort, ticket: o.ticket ?? null,
     started: now.toISOString(), ended: null, minutes: null, tokens: null, result: null, reason: null, dir, pid: child.pid, pidStarted: processStarted(child.pid),
     capMinutes: o.capMinutes ?? cfg.caps.minutes, capTokens: o.capTokens ?? cfg.caps.tokens,
   };
@@ -88,8 +90,6 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
 }
 
 if (import.meta.main && process.argv[2] === "--record-exit") {
-  // Stay as group leader during a cap stop, so the watcher can still verify the group if it must escalate.
-  process.on("SIGTERM", () => {});
   let status: number | "signal";
   try {
     const harness = Bun.spawn(process.argv.slice(3), { stdin: "ignore", stdout: "inherit", stderr: "inherit" });

@@ -20,6 +20,7 @@ export type Backlog = { label: string; command: string[]; everyMinutes: number }
 /** A sign-in that lapses: `recordFile` holds the ISO time it was made; the owner is told 3 hours before `hours` are up. */
 export type Expiry = { name: string; recordFile: string; hours: number; pausedFile?: string };
 export type Config = {
+  workRoots: string[]; disposableFolders: string[]; diskAlarmPercent: number;
   privateDir: string; timezone: string; defaultProvider: ProviderName; providers: Partial<Record<ProviderName, ProviderConfig>>;
   caps: { minutes: number; tokens: number; silentMinutes: number };
   notify: { live: boolean; owner: Channel; coordinator: Channel; unansweredMinutes: number; ownerMaxPerDay: number };
@@ -66,7 +67,21 @@ export function loadConfig(path = configPath(), raw?: Record<string, any>): Conf
     return { ...e, recordFile: home(e.recordFile), pausedFile: e.pausedFile && home(e.pausedFile) };
   });
   if (r.defaultProvider && !enabled.includes(r.defaultProvider)) throw Error(`defaultProvider "${r.defaultProvider}" is not an enabled provider.`);
+  const workRoots = r.workRoots ?? [], disposableFolders = r.disposableFolders ?? ["node_modules", ".next", ".turbo"];
+  const dedicatedRoot = (p: unknown) => {
+    if (typeof p !== "string" || !/^(\/|~\/)/.test(p) || p.split("/").includes("..") || p.includes("\0")) return false;
+    const root = home(p);
+    return root !== "/" && root !== homedir() && !homedir().startsWith(root + "/");
+  };
+  if (!Array.isArray(workRoots) || !workRoots.every(dedicatedRoot))
+    throw Error("workRoots needs a list of absolute paths to dedicated job folders.");
+  if (!Array.isArray(disposableFolders) || !disposableFolders.every(n => typeof n === "string" && n.trim() && ![".", "..", ".git"].includes(n.toLowerCase()) && !n.includes("/") && !n.includes("\0")))
+    throw Error("disposableFolders needs plain folder names.");
+  const diskAlarmPercent = r.diskAlarmPercent ?? 80;
+  if (!Number.isFinite(diskAlarmPercent) || diskAlarmPercent <= 0 || diskAlarmPercent > 100)
+    throw Error("diskAlarmPercent must be above zero and at most 100.");
   return {
+    workRoots: [...new Set<string>(workRoots.map(home))], disposableFolders, diskAlarmPercent,
     privateDir: home(r.privateDir ?? dirname(path)), timezone,
     defaultProvider: r.defaultProvider ?? enabled[0] ?? "codex", providers,
     caps: { minutes: 60, tokens: 500_000, silentMinutes: 10, ...r.caps },

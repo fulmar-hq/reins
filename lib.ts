@@ -18,6 +18,7 @@ export type Job = {
   event: "started" | "ended"; id: string; name: string; kind: Kind; provider: ProviderName; model?: string | null; effort?: string | null; ticket: string | null;
   started: string; ended: string | null; minutes: number | null; tokens: Tokens | null;
   purpose?: Purpose; retryOf?: string | null; outcome?: Outcome | null; achieved?: boolean | null;
+  cwd?: import("./tidy").Folder | null;
   reasonKind?: "redirected";
   result: Result | null; reason: string | null; dir: string; pid: number; pidStarted: string; capMinutes: number; capTokens: number;
 };
@@ -95,8 +96,10 @@ export const processStarted = (pid: number) => liveProcess(pid)?.started ?? "";
  *  This is the only condition under which a job may be signalled. Leftover children of a leader that has gone are never
  *  enough, because nothing then proves the group is still ours. */
 export function isOurLeader(pid: number, started: string): boolean {
-  const same = liveProcess(pid);
-  return Boolean(same) && started !== "" && same!.started === started && same!.pgid === pid;
+  if (!Number.isSafeInteger(pid) || pid <= 1 || !started) return false;
+  const rows = processes(), caller = rows.find(p => p.pid === process.pid);
+  if (!caller || pid === caller.pgid) return false;
+  return rows.some(p => p.pid === pid && p.pgid === pid && p.started === started && !p.stat.startsWith("Z"));
 }
 const lockProcesses = () => processes({ ...process.env, TZ: "UTC", LC_ALL: "C" });
 const lockStartPrefix = "UTC:";

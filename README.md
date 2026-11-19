@@ -20,7 +20,7 @@ in the tools. There are no standing AI "owners" and nothing ever wakes a model t
 
 ## Quick start
 
-Requirements: macOS (launchd is the only scheduler supported so far), [Bun](https://bun.sh), python3 (only for the
+Requirements: macOS (launchd is the only scheduler supported so far), [Bun](https://bun.sh), python3 (for folder cleanup and the
 Claude usage meter), and at least one of Codex or Claude Code, installed and signed in by you. One tool is enough.
 
 ```sh
@@ -130,6 +130,35 @@ The config sets which tools are enabled, their everyday model and effort, named 
 reached, `notify.live` (false means dry-run: nothing leaves this machine; the coordinator's wake file is still written), and optional **extra meters**: a name, a limit, a
 monthly or weekly reset, and a command that prints `{"used": n}` with optional `forecast` and `limit`. With no
 file, every installed tool is enabled and nothing is sent.
+
+### Work folders and disk space
+
+Set `workRoots` to dedicated parent folders for job checkouts. Use absolute paths or
+`~/` paths without symbolic links or `..` components. For example:
+
+```json
+{
+  "workRoots": ["~/example-job-work"],
+  "disposableFolders": ["node_modules", ".next", ".turbo"],
+  "diskAlarmPercent": 80
+}
+```
+
+After a confirmed job end, Reins checks only the listed names directly inside the job’s
+recorded working folder. It removes a real directory if the work folder is inside a
+configured root, the path resolves to that direct child, and Git confirms the directory
+contains no tracked files. The ledger records each removed path. The names above are the defaults.
+
+Run `bun tidy.ts` to review worktrees under those roots. It prints reasons to keep worktrees
+and a shell command for each clean linked worktree whose repository has no stash and whose
+HEAD is reachable from a remote branch. Review local history, including detached commits
+in the worktree reflog, before running a printed command yourself. Shipping leaves worktrees in place.
+
+With roots configured, **Disk on this machine** shows the fullest disk holding a root.
+The watcher checks every 15 minutes and wakes the coordinator when usage reaches
+`diskAlarmPercent` (default 80). Falling below the threshold arms the alarm again.
+Without roots, cleanup, worktree reporting and the disk meter are off.
+Stopping a running job ends its verified process group.
 
 ## Uninstall
 
