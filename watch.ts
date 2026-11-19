@@ -75,9 +75,9 @@ function recordEnd(cfg: Config, job: Job, verdict: JobEnd, now: number, dryRun =
   const text = verdict.outcome === "finished" ? `Finished: ${job.name} (${used}).` : `${summary}: ${job.name}, ${verdict.reason} (${used}).`;
   withLock(f.lock, () => {
     if (!runningJob(f.ledger, job.id)) return;
-    if (job.work && verdict.result !== "ended-unconfirmed") ended.workFolders = tidyJob(cfg, job, dryRun);
+    if (job.cwd !== undefined && verdict.result !== "ended-unconfirmed") ended.ownedFolders = tidyJob(cfg, job, dryRun);
     appendLine(f.ledger, ended);
-    if (ended.workFolders?.length && job.ticket && readTickets(cfg).some(t => t.id === job.ticket && t.stage === "shipped"))
+    if (ended.ownedFolders?.length && job.ticket && readTickets(cfg).some(t => t.id === job.ticket && t.stage === "shipped"))
       tidyShipped(cfg, job.ticket, dryRun);
     appendLine(f.events, { key: `job:${job.id}`, at: ended.ended!, type: ended.result!, text, dir: job.dir,
       ...(verdict.reasonKind === "redirected" ? { quiet: true } : {}) } satisfies Event);

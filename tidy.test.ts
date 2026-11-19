@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadConfig } from "./config";
@@ -7,7 +7,7 @@ import { appendLine, files, readLines, type Job } from "./lib";
 import { diskMeter } from "./meters";
 import { pass, METER_GAP_MS } from "./watch";
 import { addTicket, moveTicket } from "./ticket";
-import { snapshot, tidyJob, tidyShipped } from "./tidy";
+import { folderReport, workFolder, tidyJob, tidyShipped } from "./tidy";
 
 test("cleanup roots exclude broad and ambiguous paths", () => {
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), "roots-"))), path = join(tmp, "config.json");
@@ -30,20 +30,39 @@ test("tidy stays in the job folder and preserves work until it is clean and push
   git(tmp, "init", "--bare", "remote");
   git(repo, "remote", "add", "origin", join(tmp, "remote"));
   git(repo, "push", "origin", "main");
-  const work = snapshot(cfg, [repo]);
   git(repo, "worktree", "add", "-b", "topic", tree);
+  const dir = join(tmp, "run"), assigned = join(root, "assigned/nested"), sibling = join(root, "neighbor");
+  mkdirSync(dir);
+  mkdirSync(assigned, { recursive: true });
+  const job = { id: "job", ticket: "ticket", dir, event: "ended", cwd: workFolder(cfg, assigned) } as Job;
+  writeFileSync(join(dir, folderReport), [tree, outside, "relative", root].join("\n"));
+  git(repo, "worktree", "add", "--detach", sibling, "main");
+  mkdirSync(join(sibling, "cache"));
+  const tracked = join(tree, "tracked/cache/file"), extra = join(tree, "tracked/cache/extra");
+  mkdirSync(dirname(tracked), { recursive: true });
+  writeFileSync(tracked, "original");
+  git(tree, "add", "tracked");
+  git(tree, "commit", "-m", "track cache file");
+  writeFileSync(tracked, "uncommitted edit");
+  writeFileSync(extra, "keep the entire cache");
   const cache = join(tree, "nested/cache"), keep = join(tree, "keep"), link = join(tree, "cache");
   mkdirSync(cache, { recursive: true });
   writeFileSync(join(cache, "data"), "example");
   writeFileSync(keep, "work in progress");
   symlinkSync(outside, link);
-  const job = { id: "job", ticket: "ticket", event: "ended", work } as Job;
   tidyJob(cfg, job, true);
   expect(existsSync(cache)).toBe(true);
-  job.workFolders = tidyJob(cfg, job);
+  job.ownedFolders = tidyJob(cfg, job);
+  expect(job.ownedFolders.map(f => f.path)).toEqual([assigned, tree]);
   appendLine(files(cfg).ledger, job);
+  appendLine(files(cfg).ledger, { id: "old", event: "ended", ticket: "ticket", workFolders: [workFolder(cfg, sibling)] });
   expect(existsSync(cache)).toBe(false);
-  for (const p of [keep, link, join(outside, "cache"), join(root, "older/cache")]) expect(existsSync(p)).toBe(true);
+  expect(readFileSync(tracked, "utf8")).toBe("uncommitted edit");
+  expect(existsSync(extra)).toBe(true);
+  expect(readLines(files(cfg).ledger)).toContainEqual(expect.objectContaining({
+    event: "tidy-skipped", path: dirname(tracked), reason: "folder contains Git-tracked files",
+  }));
+  for (const p of [keep, link, join(sibling, "cache"), join(outside, "cache"), join(root, "older/cache")]) expect(existsSync(p)).toBe(true);
   tidyShipped(cfg, "ticket");
   expect(existsSync(keep)).toBe(true);
   git(tree, "add", ".");
@@ -85,6 +104,7 @@ test("tidy stays in the job folder and preserves work until it is clean and push
     brief: { job: "example", doneMeans: "example", whereToLook: "example", check: "example" } });
   moveTicket(cfg, "ticket", "shipped", "coordinator", Date.now(), "checked");
   expect(existsSync(tree)).toBe(false);
+  expect(existsSync(join(sibling, ".git"))).toBe(true);
   const removed = readLines<{ event: string; path: string; bytes: number }>(files(cfg).ledger).filter(r => r.event === "removed");
   expect(removed.map(r => r.path)).toEqual([cache, tree]);
   expect(removed.every(r => r.bytes > 0)).toBe(true);

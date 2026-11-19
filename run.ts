@@ -10,7 +10,7 @@ import { enabledProviders, loadConfig, type Config, type ProviderName } from "./
 import { EXIT_NOTE, KINDS, appendLine, files, jobs, processStarted, purposeForKind, withLock, type Job, type Kind } from "./lib";
 import { PROVIDERS } from "./providers";
 import { moveTicketLocked, readTickets } from "./ticket";
-import { snapshot } from "./tidy";
+import { folderReport, workFolder } from "./tidy";
 import { stopRedirected } from "./watch";
 
 export type Launch = {
@@ -64,12 +64,13 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
   const { provider, argv, prompt, model, effort } = plan(cfg, o, dir);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "prompt.txt"), prompt, { mode: 0o600, flag: "wx" });
+  const cwd = cfg.workRoots.length ? workFolder(cfg, resolve(o.cwd)) ?? null : undefined;
+  if (cfg.workRoots.length) writeFileSync(join(dir, folderReport), "", { mode: 0o600, flag: "wx" });
   const log = openSync(join(dir, "log.txt"), "ax");
   // `detached` gives the job its own process group, which is what the watcher stops.
   const env = { ...process.env };
   delete env.REINS_PRIVATE_DIR;
   delete env.REINS_CONFIG;
-  const work = snapshot(cfg, [o.cwd, dir]);
   let child;
   try {
     child = Bun.spawn([process.execPath, "--no-env-file", import.meta.path, "--record-exit", process.env.REINS_FAKE_HARNESS ?? argv[0]!, ...argv.slice(1)], {
@@ -78,7 +79,7 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
   } finally { closeSync(log); }
   child.unref();
   const job: Job = {
-    event: "started", work, id: `${day}-${time}-${slug}-${crypto.randomUUID().slice(0, 8)}`, name: o.name.trim(), kind: o.kind, provider, model, effort, ticket: o.ticket ?? null,
+    event: "started", cwd, id: `${day}-${time}-${slug}-${crypto.randomUUID().slice(0, 8)}`, name: o.name.trim(), kind: o.kind, provider, model, effort, ticket: o.ticket ?? null,
     started: now.toISOString(), ended: null, minutes: null, tokens: null, result: null, reason: null, dir, pid: child.pid, pidStarted: processStarted(child.pid),
     capMinutes: o.capMinutes ?? cfg.caps.minutes, capTokens: o.capTokens ?? cfg.caps.tokens,
   };

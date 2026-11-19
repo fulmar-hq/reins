@@ -18,7 +18,7 @@ export type Job = {
   event: "started" | "ended"; id: string; name: string; kind: Kind; provider: ProviderName; model?: string | null; effort?: string | null; ticket: string | null;
   started: string; ended: string | null; minutes: number | null; tokens: Tokens | null;
   purpose?: Purpose; retryOf?: string | null; outcome?: Outcome | null; achieved?: boolean | null;
-  work?: import("./tidy").Work; workFolders?: import("./tidy").Work["used"];
+  cwd?: import("./tidy").Folder | null; ownedFolders?: import("./tidy").Folder[];
   reasonKind?: "redirected";
   result: Result | null; reason: string | null; dir: string; pid: number; pidStarted: string; capMinutes: number; capTokens: number;
 };

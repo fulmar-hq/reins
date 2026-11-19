@@ -150,10 +150,12 @@ ancestors are refused. Reserve those roots for job work. For example, your confi
 }
 ```
 
-When a job ends, Reins looks inside the work folder it ran in and any new work folders that
-appeared directly under those roots. If jobs overlap, it skips new folders whose owner is unclear.
-It removes folders with the exact names in `disposableFolders`, including nested matches.
-The three names above are the defaults. Stopping a running job also stops its whole process group.
+When a job ends, Reins tidies its exact `--cwd` and any folders the job listed in
+`work-folders.txt` in its run folder. Write one absolute path per line. Each folder must be
+inside a configured root. Reins removes folders with the exact names in `disposableFolders`,
+including nested matches. If Git tracks anything in a matching folder, Reins keeps the whole
+folder and logs the reason. The three names above are the defaults.
+Stopping a running job also stops its whole process group.
 
 Shipping a ticket removes its recorded Git worktrees only after Git confirms they are clean
 and their commit is reachable from a branch on a remote. Local files (including ignored files), a stash
