@@ -8,7 +8,6 @@
 //   bun ticket.ts ack     "I have seen the events so far" (any other command here also counts)
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tidyShipped } from "./tidy";
 import { loadConfig, type Config } from "./config";
 import { appendLine, files, jobs, ticketAttempts, withLock, type Event, type Job } from "./lib";
 
@@ -100,7 +99,6 @@ export function moveTicketLocked(cfg: Config, id: string, stage: Stage, by: stri
   else delete ticket.shipment;
   Object.assign(ticket, { stage, updated: new Date(now).toISOString() });
   save(cfg, tickets, `moved "${ticket.title}" from ${from} to ${stage}`, by, now, { ticket: id, stage });
-  if (stage === "shipped") tidyShipped(cfg, id);
 }
 export function orderTickets(cfg: Config, ids: string[], by = "coordinator", now = Date.now()) {
   withLock(files(cfg).lock, () => {
@@ -185,11 +183,6 @@ if (import.meta.main) {
       process.exit(0);
     } else if (verb === "move") {
       const proof = flag("--proof");
-      if (rest.includes("--dry-run")) {
-        if (rest.length !== 3 || rest[1] !== "shipped" || rest[2] !== "--dry-run") throw Error("Use move <id> shipped --dry-run.");
-        withLock(files(cfg).lock, () => tidyShipped(cfg, rest[0]!, true));
-        process.exit(0);
-      }
       moveTicket(cfg, rest[0] ?? "", rest.slice(1).join(" ") as Stage, by, Date.now(), proof);
     } else if (verb === "order") orderTickets(cfg, rest, by);
     else if (verb === "ack") appendLine(files(cfg).events, { key: `ack:${Date.now()}`, at: new Date().toISOString(), type: "ack", text: `${by ?? "coordinator"} acknowledged the events so far`, quiet: true } satisfies Event);

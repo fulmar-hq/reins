@@ -133,14 +133,8 @@ file, every installed tool is enabled and nothing is sent.
 
 ### Work folders and disk space
 
-**Disk on this machine** shows the percentage used on the disk holding your private folder.
-If you set `workRoots`, it shows the fullest disk holding one of those folders. The watcher checks
-every 15 minutes and wakes the coordinator when usage reaches `diskAlarmPercent` (default 80).
-The meter has no reset date. Dropping below the threshold arms the alarm again.
-
-Folder cleanup is off until you set `workRoots`. Give it the existing parent folders where jobs
-keep their work, using full paths with no symbolic links or `..` components. The home folder and its
-ancestors are refused. Reserve those roots for job work. For example, your config can include:
+Set `workRoots` to dedicated parent folders for job checkouts. Use absolute paths or
+`~/` paths without symbolic links or `..` components. For example:
 
 ```json
 {
@@ -150,21 +144,21 @@ ancestors are refused. Reserve those roots for job work. For example, your confi
 }
 ```
 
-When a job ends, Reins tidies its exact `--cwd` and any folders the job listed in
-`work-folders.txt` in its run folder. Write one absolute path per line. Each folder must be
-inside a configured root. Reins removes folders with the exact names in `disposableFolders`,
-including nested matches. If Git tracks anything in a matching folder, Reins keeps the whole
-folder and logs the reason. The three names above are the defaults.
-Stopping a running job also stops its whole process group.
+After a confirmed job end, Reins checks only the listed names directly inside the job’s
+recorded working folder. It removes a real directory if the work folder is inside a
+configured root, the path resolves to that direct child, and Git confirms the directory
+contains no tracked files. The ledger records each removed path. The names above are the defaults.
 
-Shipping a ticket removes its recorded Git worktrees only after Git confirms they are clean
-and their commit is reachable from a branch on a remote. Local files (including ignored files), a stash
-in the shared repository, an index entry marked assume-unchanged or skip-worktree, or an unavailable
-remote can keep a worktree in place. The ledger records the reason for a skip, and the path and
-estimated bytes freed for each removal.
+Run `bun tidy.ts` to review worktrees under those roots. It prints reasons to keep worktrees
+and a shell command for each clean linked worktree whose repository has no stash and whose
+HEAD is reachable from a remote branch. Review local history, including detached commits
+in the worktree reflog, before running a printed command yourself. Shipping leaves worktrees in place.
 
-Use `bun watch.ts --dry-run` to print the folders a watcher pass would remove. The pass still records
-job endings. Use `bun ticket.ts move <id> shipped --dry-run` to preview worktree removal before shipping.
+With roots configured, **Disk on this machine** shows the fullest disk holding a root.
+The watcher checks every 15 minutes and wakes the coordinator when usage reaches
+`diskAlarmPercent` (default 80). Falling below the threshold arms the alarm again.
+Without roots, cleanup, worktree reporting and the disk meter are off.
+Stopping a running job ends its verified process group.
 
 ## Uninstall
 

@@ -67,8 +67,7 @@ async function harness(cfg: Config, name: ReturnType<typeof enabledProviders>[nu
 export async function diskMeter(cfg: Config, previous: Meter[], now: number, run = readCommand) {
   const id = "disk", label = "Disk on this machine";
   try {
-    const paths = cfg.workRoots.length ? cfg.workRoots : [cfg.privateDir];
-    const rows = (await run(["df", "-Pk", ...paths])).trimEnd().split("\n").slice(1);
+    const rows = (await run(["df", "-Pk", ...cfg.workRoots])).trimEnd().split("\n").slice(1);
     if (!rows.length) throw Error();
     const used = rows.map(row => {
       const match = row.match(/^.*?\s+\d+\s+\d+\s+\d+\s+(\d+)%\s+/);
@@ -81,7 +80,7 @@ export async function diskMeter(cfg: Config, previous: Meter[], now: number, run
   }
 }
 export async function readMeters(cfg: Config, previous: Meter[], now: number): Promise<Meter[]> {
-  return (await Promise.all([diskMeter(cfg, previous, now), ...enabledProviders(cfg).map(name => harness(cfg, name, previous, now)), ...cfg.extraMeters.map(m => extra(m, previous, now))])).flat();
+  return (await Promise.all([...(cfg.workRoots.length ? [diskMeter(cfg, previous, now)] : []), ...enabledProviders(cfg).map(name => harness(cfg, name, previous, now)), ...cfg.extraMeters.map(m => extra(m, previous, now))])).flat();
 }
 /** One plain sentence for a meter; `at` formats a time in the configured timezone. */
 export function meterLine(m: Meter, at: (ms: number) => string): string {

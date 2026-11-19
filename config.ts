@@ -75,7 +75,7 @@ export function loadConfig(path = configPath(), raw?: Record<string, any>): Conf
   };
   if (!Array.isArray(workRoots) || !workRoots.every(dedicatedRoot))
     throw Error("workRoots needs a list of absolute paths to dedicated job folders.");
-  if (!Array.isArray(disposableFolders) || !disposableFolders.every(n => typeof n === "string" && n.trim() && ![".", "..", ".git"].includes(n) && !n.includes("/") && !n.includes("\0")))
+  if (!Array.isArray(disposableFolders) || !disposableFolders.every(n => typeof n === "string" && n.trim() && ![".", "..", ".git"].includes(n.toLowerCase()) && !n.includes("/") && !n.includes("\0")))
     throw Error("disposableFolders needs plain folder names.");
   const diskAlarmPercent = r.diskAlarmPercent ?? 80;
   if (!Number.isFinite(diskAlarmPercent) || diskAlarmPercent <= 0 || diskAlarmPercent > 100)

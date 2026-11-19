@@ -10,7 +10,7 @@ import { enabledProviders, loadConfig, type Config, type ProviderName } from "./
 import { EXIT_NOTE, KINDS, appendLine, files, jobs, processStarted, purposeForKind, withLock, type Job, type Kind } from "./lib";
 import { PROVIDERS } from "./providers";
 import { moveTicketLocked, readTickets } from "./ticket";
-import { folderReport, workFolder } from "./tidy";
+import { workFolder } from "./tidy";
 import { stopRedirected } from "./watch";
 
 export type Launch = {
@@ -40,7 +40,7 @@ export function plan(cfg: Config, o: Launch, dir = "<run folder>") {
 export async function launch(cfg: Config, o: Launch): Promise<Job> {
   plan(cfg, o); // refuse a bad request before creating anything
   const stage = o.kind === "build" || o.kind === "fix" ? "building" : o.kind === "review" ? "in review" : null;
-  return cfg.workRoots.length || o.ticket && stage
+  return o.ticket && stage
     ? withLock(files(cfg).lock, () => startJob(cfg, o, stage))
     : startJob(cfg, o, null);
 }
@@ -65,7 +65,6 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "prompt.txt"), prompt, { mode: 0o600, flag: "wx" });
   const cwd = cfg.workRoots.length ? workFolder(cfg, resolve(o.cwd)) ?? null : undefined;
-  if (cfg.workRoots.length) writeFileSync(join(dir, folderReport), "", { mode: 0o600, flag: "wx" });
   const log = openSync(join(dir, "log.txt"), "ax");
   // `detached` gives the job its own process group, which is what the watcher stops.
   const env = { ...process.env };

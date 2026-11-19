@@ -102,6 +102,7 @@ test("a job over its cap is stopped and the ledger says why", async () => {
   const cfg = scratch(), root = cfg.privateDir, fake = join(root, "fake-harness"), prompt = join(root, "p.txt");
   const workRoot = realpathSync(root), cwd = join(workRoot, "checkout"), cache = join(cwd, "node_modules");
   mkdirSync(cache, { recursive: true });
+  expect(Bun.spawnSync(["git", "init", "-q", cwd]).exitCode).toBe(0);
   cfg.workRoots = [workRoot];
   writeFileSync(join(cwd, ".env"), `REINS_PRIVATE_DIR="${root}"\nREINS_CONFIG="${join(root, "reins.config.json")}"\n`);
   writeFileSync(fake, '#!/bin/sh\nprintf "%s:%s\\n" "${REINS_PRIVATE_DIR-unset}" "${REINS_CONFIG-unset}"\n(trap "" TERM; exec sleep 300) &\nwait\n'); chmodSync(fake, 0o755); writeFileSync(prompt, "made-up prompt");

@@ -7,7 +7,7 @@ import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "n
 import { join } from "node:path";
 import { enabledProviders, loadConfig, type Config } from "./config";
 import { EXIT_NOTE, KINDS, NO_RESULT, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, slice, ticketAttempts, tryLock, withLock, type Event, type Job, type Outcome, type Result, type Tokens } from "./lib";
-import { tidyJob, tidyShipped } from "./tidy";
+import { tidyJob } from "./tidy";
 import { meterLine, readBacklog, readMeters, type Meter } from "./meters";
 import { legacyAsks, newsHealth, recordWake, reviewAsksLocked, send, unansweredMinutes, type Message } from "./notify";
 import { PROVIDERS } from "./providers";
@@ -75,16 +75,10 @@ function recordEnd(cfg: Config, job: Job, verdict: JobEnd, now: number, dryRun =
   const text = verdict.outcome === "finished" ? `Finished: ${job.name} (${used}).` : `${summary}: ${job.name}, ${verdict.reason} (${used}).`;
   withLock(f.lock, () => {
     if (!runningJob(f.ledger, job.id)) return;
-    if (job.cwd !== undefined && verdict.result !== "ended-unconfirmed") ended.ownedFolders = tidyJob(cfg, job, dryRun);
+    if (verdict.result !== "ended-unconfirmed") tidyJob(cfg, job, dryRun);
     appendLine(f.ledger, ended);
     appendLine(f.events, { key: `job:${job.id}`, at: ended.ended!, type: ended.result!, text, dir: job.dir,
       ...(verdict.reasonKind === "redirected" ? { quiet: true } : {}) } satisfies Event);
-    if (ended.ownedFolders?.length && job.ticket) {
-      // The watcher reports an unreadable ticket board separately. Keep the worktree in that case.
-      let tickets: Ticket[];
-      try { tickets = readTickets(cfg); } catch { return; }
-      if (tickets.some(t => t.id === job.ticket && t.stage === "shipped")) tidyShipped(cfg, job.ticket, dryRun);
-    }
   });
 }
 
@@ -193,6 +187,7 @@ async function passLocked(cfg: Config, f: ReturnType<typeof files>, o: Options) 
   const refresh = now - metersAt >= METER_GAP_MS;
   const backlogRead = readBacklog(cfg.backlog, previous.backlog, now);
   if (refresh) try { meters = await (o.meters ?? readMeters)(cfg, meters, now); metersAt = now; } catch (error) { errors.push(`meters: ${String(error)}`); }
+  if (!cfg.workRoots.length) meters = meters.filter(m => m.id !== "disk");
   const backlog = await backlogRead;
   const meterAlarms = new Map(Object.entries<MeterAlarm>(previous.meterAlarms ?? {}));
   // Older snapshots already have the last usage reading and the old forecast event key.
