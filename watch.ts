@@ -77,10 +77,14 @@ function recordEnd(cfg: Config, job: Job, verdict: JobEnd, now: number, dryRun =
     if (!runningJob(f.ledger, job.id)) return;
     if (job.cwd !== undefined && verdict.result !== "ended-unconfirmed") ended.ownedFolders = tidyJob(cfg, job, dryRun);
     appendLine(f.ledger, ended);
-    if (ended.ownedFolders?.length && job.ticket && readTickets(cfg).some(t => t.id === job.ticket && t.stage === "shipped"))
-      tidyShipped(cfg, job.ticket, dryRun);
     appendLine(f.events, { key: `job:${job.id}`, at: ended.ended!, type: ended.result!, text, dir: job.dir,
       ...(verdict.reasonKind === "redirected" ? { quiet: true } : {}) } satisfies Event);
+    if (ended.ownedFolders?.length && job.ticket) {
+      // The watcher reports an unreadable ticket board separately. Keep the worktree in that case.
+      let tickets: Ticket[];
+      try { tickets = readTickets(cfg); } catch { return; }
+      if (tickets.some(t => t.id === job.ticket && t.stage === "shipped")) tidyShipped(cfg, job.ticket, dryRun);
+    }
   });
 }
 

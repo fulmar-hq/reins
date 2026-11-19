@@ -21,11 +21,17 @@ def check(path):
         raise ValueError("path moved or points outside the work folder: " + str(path))
 
 
+def git_metadata(path):
+    # Bare repositories have no .git entry. Linked worktree metadata uses commondir.
+    return path.name == ".git" or (os.path.lexists(path / "HEAD") and
+            (os.path.lexists(path / "objects") or os.path.lexists(path / "commondir")))
+
+
 def cache_entries(path):
     check(path)
     entry = path.lstat()
     if stat.S_ISDIR(entry.st_mode):
-        if entry.st_dev != info.st_dev or os.path.lexists(path / ".git"):
+        if entry.st_dev != info.st_dev or git_metadata(path) or os.path.lexists(path / ".git"):
             raise ValueError("mount or Git work inside disposable folder")
         for child in path.iterdir():
             yield from cache_entries(child)
@@ -76,8 +82,10 @@ def walk(parent):
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 detail = {"reason": str(error)}
             print(json.dumps(dict(path=str(path), **detail)), flush=True)
-        elif not os.path.lexists(path / ".git"):
+        elif not git_metadata(path) and not os.path.lexists(path / ".git"):
             walk(path)
 
 
+if any(git_metadata(p) for p in (root, *root.parents)):
+    raise ValueError("work folder is inside Git metadata")
 walk(root)

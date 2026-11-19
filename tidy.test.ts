@@ -110,6 +110,52 @@ test("tidy stays in the job folder and preserves work until it is clean and push
   expect(removed.every(r => r.bytes > 0)).toBe(true);
 });
 
+test("cache cleanup preserves bare repositories and their contents", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "git-cache-")));
+  const cfg = loadConfig(join(root, "config.json"), { workRoots: [root], disposableFolders: ["cache", "objects"] });
+  const cwd = join(root, "checkout"), cache = join(cwd, "cache"), nested = join(cache, "backup.git");
+  const bare = join(cwd, "mirror.git"), run = join(root, "run");
+  mkdirSync(cache, { recursive: true });
+  mkdirSync(run);
+  for (const repo of [nested, bare]) {
+    expect(Bun.spawnSync(["git", "init", "--bare", repo]).exitCode).toBe(0);
+  }
+  const metadataCache = join(bare, "objects/cache");
+  mkdirSync(metadataCache);
+  writeFileSync(join(run, folderReport), join(bare, "objects"));
+  const job = { id: "example", dir: run, cwd: workFolder(cfg, cwd) } as Job;
+  tidyJob(cfg, job);
+  for (const repo of [nested, bare]) {
+    expect(existsSync(join(repo, "HEAD"))).toBe(true);
+    expect(existsSync(join(repo, "objects"))).toBe(true);
+  }
+  expect(existsSync(metadataCache)).toBe(true);
+  expect(readLines(files(cfg).ledger)).toContainEqual(expect.objectContaining({
+    event: "tidy-skipped", path: cache,
+  }));
+});
+
+test("an unreadable ticket board preserves the work folder and completion event", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "job-end-")));
+  const cfg = loadConfig(join(root, "config.json"), { providers: {}, workRoots: [root] });
+  const tree = join(root, "tree"), dir = join(root, "run");
+  mkdirSync(tree);
+  mkdirSync(dir);
+  writeFileSync(join(dir, folderReport), "");
+  writeFileSync(join(dir, "result.txt"), "VERDICT: DONE\n");
+  writeFileSync(join(dir, "log.txt"), "Reins harness exit: 0\n");
+  appendLine(files(cfg).ledger, {
+    id: "example", event: "started", kind: "build", name: "Example", provider: "codex", ticket: "ticket",
+    dir, cwd: workFolder(cfg, tree), started: new Date().toISOString(), pid: 0, pidStarted: "",
+  });
+  writeFileSync(join(root, "tickets.json"), "{");
+  const state = await pass({ cfg, meters: async () => [] });
+  expect(state?.errors.some(e => e.startsWith("tickets.json"))).toBe(true);
+  expect(existsSync(tree)).toBe(true);
+  expect(readLines(files(cfg).ledger)).toContainEqual(expect.objectContaining({ id: "example", result: "finished", achieved: true }));
+  expect(readLines(files(cfg).events)).toContainEqual(expect.objectContaining({ key: "job:example", type: "finished" }));
+});
+
 test("disk reads the fullest configured volume without a reset or forecast", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "meter-"));
   const cfg = loadConfig(join(tmp, "config.json"), { providers: {} });

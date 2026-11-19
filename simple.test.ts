@@ -435,6 +435,15 @@ test("setting an older ticket can add an estimate, set or clear a due date, and 
 });
 
 // Rule: stopping a job must never signal a process that is not provably that job.
+test("the watcher never accepts its own process group as a job", async () => {
+  const child = Bun.spawn([process.execPath, "--no-env-file", "-e", [
+    'import { isOurLeader, processStarted } from "./lib";',
+    'const started = processStarted(process.pid);',
+    'process.exit(started && !isOurLeader(process.pid, started) ? 0 : 1);',
+  ].join("\n")], { cwd: import.meta.dir, detached: true });
+  expect(await child.exited).toBe(0);
+});
+
 test("a process whose identity cannot be confirmed is never signalled", async () => {
   const bystander = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
   await new Promise(ok => bystander.once("spawn", ok));
