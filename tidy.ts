@@ -110,8 +110,14 @@ export function tidyShipped(cfg: Config, ticket: string, dryRun = false) {
       const git = (...args: string[]) => command(["git", ...args], f.path);
       if (git("rev-parse", "--show-toplevel") !== f.path) throw Error("not the worktree root");
       const status = () => git("status", "--porcelain", "--untracked-files=all", "--ignored", "--ignore-submodules=none");
-      if (status())
-        throw Error("worktree has local changes or files");
+      const requireClean = () => {
+        if (git("for-each-ref", "--format=%(objectname)", "refs/stash")) throw Error("repository has a stash");
+        // Git status and worktree remove can both overlook edits to these index entries.
+        if (/(?:^|\0)[a-zS] /.test(git("ls-files", "-v", "-z")))
+          throw Error("index marks files assume-unchanged or skip-worktree");
+        if (status()) throw Error("worktree has local changes or files");
+      };
+      requireClean();
       const head = git("rev-parse", "HEAD");
       // Check live branch tips too: a deleted or force-pushed branch can leave a stale local tracking ref.
       const pushed = git("remote").split("\n").filter(Boolean).some(remote =>
@@ -124,7 +130,8 @@ export function tidyShipped(cfg: Config, ticket: string, dryRun = false) {
       if (!Number.isFinite(bytes)) throw Error("could not measure worktree");
       if (dryRun) console.log("Would remove", f.path, bytes, "bytes");
       else {
-        if (!valid(cfg, f) || git("rev-parse", "HEAD") !== head || status()) throw Error("worktree changed during inspection");
+        if (!valid(cfg, f) || git("rev-parse", "HEAD") !== head) throw Error("worktree changed during inspection");
+        requireClean();
         git("worktree", "remove", f.path);
         log(cfg, job, f.path, { bytes });
       }

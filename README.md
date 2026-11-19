@@ -139,8 +139,8 @@ every 15 minutes and wakes the coordinator when usage reaches `diskAlarmPercent`
 The meter has no reset date. Dropping below the threshold arms the alarm again.
 
 Folder cleanup is off until you set `workRoots`. Give it the existing parent folders where jobs
-keep their work, using full paths with no symbolic links. Reserve those roots for job work.
-For example, your config can include:
+keep their work, using full paths with no symbolic links or `..` components. The home folder and its
+ancestors are refused. Reserve those roots for job work. For example, your config can include:
 
 ```json
 {
@@ -156,9 +156,10 @@ It removes folders with the exact names in `disposableFolders`, including nested
 The three names above are the defaults. Stopping a running job also stops its whole process group.
 
 Shipping a ticket removes its recorded Git worktrees only after Git confirms they are clean
-and their commit is reachable from a branch on a remote. Local files (including ignored files)
-or an unavailable remote can keep a worktree in place. The ledger records the reason for a skip,
-and the path and estimated bytes freed for each removal.
+and their commit is reachable from a branch on a remote. Local files (including ignored files), a stash
+in the shared repository, an index entry marked assume-unchanged or skip-worktree, or an unavailable
+remote can keep a worktree in place. The ledger records the reason for a skip, and the path and
+estimated bytes freed for each removal.
 
 Use `bun watch.ts --dry-run` to print the folders a watcher pass would remove. The pass still records
 job endings. Use `bun ticket.ts move <id> shipped --dry-run` to preview worktree removal before shipping.

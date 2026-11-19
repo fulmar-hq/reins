@@ -1,13 +1,20 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { loadConfig } from "./config";
 import { appendLine, files, readLines, type Job } from "./lib";
 import { diskMeter } from "./meters";
 import { pass, METER_GAP_MS } from "./watch";
 import { addTicket, moveTicket } from "./ticket";
 import { snapshot, tidyJob, tidyShipped } from "./tidy";
+
+test("cleanup roots exclude broad and ambiguous paths", () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), "roots-"))), path = join(tmp, "config.json");
+  for (const root of ["", "/", "relative", "~/", homedir(), dirname(homedir()), tmp + "/work/../other"]) {
+    expect(() => loadConfig(path, { workRoots: [root] }), root).toThrow("workRoots");
+  }
+});
 
 test("tidy stays in the job folder and preserves work until it is clean and pushed", () => {
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), "tidy-"))), root = join(tmp, "work");
@@ -41,6 +48,34 @@ test("tidy stays in the job folder and preserves work until it is clean and push
   expect(existsSync(keep)).toBe(true);
   git(tree, "add", ".");
   git(tree, "commit", "-m", "more work");
+  tidyShipped(cfg, "ticket");
+  expect(existsSync(tree)).toBe(true);
+  git(tree, "push", "origin", "topic");
+  writeFileSync(keep, "edited tracked file");
+  tidyShipped(cfg, "ticket");
+  expect(existsSync(keep)).toBe(true);
+  git(tree, "stash", "push", "-m", "pending local work");
+  tidyShipped(cfg, "ticket");
+  expect(existsSync(tree)).toBe(true);
+  git(tree, "stash", "pop");
+  git(tree, "restore", "keep");
+
+  for (const flag of ["assume-unchanged", "skip-worktree"]) {
+    git(tree, "update-index", "--" + flag, "keep");
+    writeFileSync(keep, "local edit hidden from status");
+    tidyShipped(cfg, "ticket");
+    expect(existsSync(keep)).toBe(true);
+    git(tree, "update-index", "--no-" + flag, "keep");
+    git(tree, "restore", "keep");
+  }
+  git(tree, "switch", "--detach", "main");
+  git(tree, "commit", "--allow-empty", "-m", "detached work");
+  tidyShipped(cfg, "ticket");
+  expect(existsSync(tree)).toBe(true);
+  git(tree, "push", "origin", "HEAD:refs/heads/reviewed-detached");
+  git(tree, "switch", "topic");
+  // Delete on the remote directly so the local remote-tracking ref is stale.
+  git(join(tmp, "remote"), "update-ref", "-d", "refs/heads/topic");
   tidyShipped(cfg, "ticket");
   expect(existsSync(tree)).toBe(true);
   git(tree, "push", "origin", "topic");

@@ -68,7 +68,12 @@ export function loadConfig(path = configPath(), raw?: Record<string, any>): Conf
   });
   if (r.defaultProvider && !enabled.includes(r.defaultProvider)) throw Error(`defaultProvider "${r.defaultProvider}" is not an enabled provider.`);
   const workRoots = r.workRoots ?? [], disposableFolders = r.disposableFolders ?? ["node_modules", ".next", ".turbo"];
-  if (!Array.isArray(workRoots) || !workRoots.every(p => typeof p === "string" && /^(\/|~\/)/.test(p) && home(p) !== "/"))
+  const dedicatedRoot = (p: unknown) => {
+    if (typeof p !== "string" || !/^(\/|~\/)/.test(p) || p.split("/").includes("..") || p.includes("\0")) return false;
+    const root = home(p);
+    return root !== "/" && root !== homedir() && !homedir().startsWith(root + "/");
+  };
+  if (!Array.isArray(workRoots) || !workRoots.every(dedicatedRoot))
     throw Error("workRoots needs a list of absolute paths to dedicated job folders.");
   if (!Array.isArray(disposableFolders) || !disposableFolders.every(n => typeof n === "string" && n.trim() && ![".", "..", ".git"].includes(n) && !n.includes("/") && !n.includes("\0")))
     throw Error("disposableFolders needs plain folder names.");
