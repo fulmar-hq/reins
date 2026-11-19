@@ -74,6 +74,8 @@ Ticket pace starts at the first job and pauses in `needs owner`. Adding a ticket
 `ticket.ts add --estimate <minutes>`. Older tickets without estimates still show their due dates.
 Pace is on track through 100%, a little over through 150%, and very over after that.
 Use `--due YYYY-MM-DD` to show a due date. Ship with `ticket.ts move <id> shipped --proof "What was checked and where"`.
+Use `ticket.ts set <id>` with `--estimate <minutes>`, `--due <YYYY-MM-DD|none>` or `--title "<plain words>"`
+to update an existing ticket.
 Add `--waiting-on <id>` with `ticket.ts add`, or use `ticket.ts set <id> --waiting-on <id>|none` to update
 or clear the optional `waitingOn` reference. The page shows the referenced ticket beneath the ticket title in the main table.
 
@@ -84,6 +86,9 @@ while a ticket is ready; a ticket is `building` or `in review` with no job for 3
 or 100 percent or turned "too fast"; a recorded sign-in ends within 3 hours; overhead passed 15 percent of the
 day's usage. A ticket also raises one alarm when it first becomes very over. Each is written to `events.jsonl`,
 and everything since the last wake goes out as one message, at most one every 5 minutes.
+A reading that crosses several usage thresholds raises one alarm for the highest threshold crossed.
+Falling below a threshold rearms it, so falling below 50 percent rearms all three. A changing forecast
+alone does not rearm a pace warning.
 
 ## When it texts you
 
@@ -109,6 +114,8 @@ Investigation and specialist jobs linked to a ticket count as build attempts unl
 `started` and `ended` are timestamps. `minutes` is the elapsed time and `tokens` records input, cached,
 output and fresh (input minus cached plus output). Unknown counts are null.
 `outcome` is finished, stopped, capped or failed once the job ends, and `why` is the recorded reason.
+A coordinator stop recorded with `bun run.ts stop <job-id> --reason redirected` sets `reasonKind` to
+`redirected` and is skipped in the Fails column.
 The reader derives purpose and outcome from the original kind and result for older jobs.
 The launcher asks for a final line of exactly `VERDICT: DONE` or `VERDICT: NOT DONE`.
 The attempt records `achieved` as true or false for these verdicts, or null when the verdict is missing or the job did not finish.

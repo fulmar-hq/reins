@@ -18,11 +18,12 @@ export type Job = {
   event: "started" | "ended"; id: string; name: string; kind: Kind; provider: ProviderName; model?: string | null; effort?: string | null; ticket: string | null;
   started: string; ended: string | null; minutes: number | null; tokens: Tokens | null;
   purpose?: Purpose; retryOf?: string | null; outcome?: Outcome | null; achieved?: boolean | null;
+  reasonKind?: "redirected";
   result: Result | null; reason: string | null; dir: string; pid: number; pidStarted: string; capMinutes: number; capTokens: number;
 };
 export type Ask = { question: string; recommendation: string; reason: string; fallback: { at: number; action: string } | null };
 export type Event = { key: string; at: string; type: string; text: string; dir?: string; ask?: Ask; askId?: string;
-  ticket?: string; stage?: string;
+  ticket?: string; stage?: string; previousTitle?: string;
   /** quiet: the coordinator's own action, recorded but never sent back to it. held: an owner text stopped by the daily limit. */
   quiet?: boolean; held?: boolean };
 
@@ -56,6 +57,7 @@ export function ticketAttempts(id: string, ledger: readonly Job[]) {
     outcome: jobOutcome(j),
     achieved: j.achieved,
     why: j.reason,
+    reasonKind: j.reasonKind,
   }));
 }
 

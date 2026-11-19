@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // The tickets file and the coordinator's one-line commands for it. Only the coordinator writes it.
 //   bun ticket.ts add --id 12 --title "Plain words" --estimate minutes [--due YYYY-MM-DD] [--waiting-on id]
-//   bun ticket.ts set 12 --waiting-on <id|none>      bun ticket.ts history 12
+//   bun ticket.ts set 12 [--estimate minutes] [--due YYYY-MM-DD|none] [--title "Plain words"] [--waiting-on id|none]
+//   bun ticket.ts history 12
 //   bun ticket.ts move 12 in review [--by name]      bun ticket.ts order 14 12 13      bun ticket.ts list
 //   bun ticket.ts move 12 shipped --proof "What was checked and where"
 //   bun ticket.ts ack     "I have seen the events so far" (any other command here also counts)
@@ -26,26 +27,29 @@ export function readTickets(cfg: Config): Ticket[] {
   if (!Array.isArray(tickets)) throw Error("tickets.json must look like {\"tickets\": [...]}");
   return tickets;
 }
-function save(cfg: Config, tickets: Ticket[], note: string, by: string, now: number, stageEvent?: Pick<Event, "ticket" | "stage">) {
+function save(cfg: Config, tickets: Ticket[], note: string, by: string, now: number, details?: Pick<Event, "ticket" | "stage" | "previousTitle">) {
   mkdirSync(cfg.privateDir, { recursive: true });
   writeFileSync(path(cfg) + ".tmp", JSON.stringify({ tickets }, null, 2) + "\n", { mode: 0o600 });
   renameSync(path(cfg) + ".tmp", path(cfg));
   // The record of who moved what, when. Quiet: the coordinator is not woken about its own moves.
-  appendLine(files(cfg).events, { key: `ticket:${now}:${note}`, at: new Date(now).toISOString(), type: "ticket", text: `${by} ${note}`, quiet: true, ...stageEvent } satisfies Event);
+  appendLine(files(cfg).events, { key: `ticket:${now}:${note}`, at: new Date(now).toISOString(), type: "ticket", text: `${by} ${note}`, quiet: true, ...details } satisfies Event);
 }
 function ticketById(tickets: Ticket[], id: string) {
   const ticket = tickets.find(t => t.id === id);
   if (!ticket) throw Error(`There is no ticket ${id}.`);
   return ticket;
 }
-export function addTicket(cfg: Config, t: Partial<Ticket> & { id: string; title: string }, by = "coordinator", now = Date.now()) {
-  const stage = t.stage ?? "ready";
-  if (!STAGES.includes(stage)) throw Error(`A stage is one of: ${STAGES.join(", ")}.`);
-  if (stage === "shipped") throw Error("Add the ticket first, then move it to shipped with --proof.");
+function validateDetails(t: Pick<Ticket, "estimate" | "due">) {
   if (t.estimate !== undefined && (!Number.isFinite(t.estimate) || t.estimate <= 0))
     throw Error("An estimate needs a positive number of minutes.");
   if (t.due !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(t.due) || !Number.isFinite(Date.parse(t.due)) || new Date(t.due).toISOString().slice(0, 10) !== t.due))
     throw Error("Give --due as a date in YYYY-MM-DD format.");
+}
+export function addTicket(cfg: Config, t: Partial<Ticket> & { id: string; title: string }, by = "coordinator", now = Date.now()) {
+  const stage = t.stage ?? "ready";
+  if (!STAGES.includes(stage)) throw Error(`A stage is one of: ${STAGES.join(", ")}.`);
+  if (stage === "shipped") throw Error("Add the ticket first, then move it to shipped with --proof.");
+  validateDetails(t);
   withLock(files(cfg).lock, () => {
     const tickets = readTickets(cfg);
     if (tickets.some(x => x.id === t.id)) throw Error(`Ticket ${t.id} already exists.`);
@@ -56,12 +60,28 @@ export function addTicket(cfg: Config, t: Partial<Ticket> & { id: string; title:
     save(cfg, tickets, `added "${t.title}" as ${stage}`, by, now, { ticket: t.id, stage });
   });
 }
-function setWaitingOn(cfg: Config, id: string, waitingOn: string, by = "coordinator", now = Date.now()) {
+function setTicket(cfg: Config, id: string, edits: Partial<Pick<Ticket, "title" | "estimate" | "due" | "waitingOn">>, by = "coordinator", now = Date.now()) {
+  const { title, estimate, due, waitingOn } = edits;
+  validateDetails({ estimate, due: due === "none" ? undefined : due });
+  if (title !== undefined && !title.trim()) throw Error("Give a title in plain words.");
   withLock(files(cfg).lock, () => {
     const tickets = readTickets(cfg), ticket = ticketById(tickets, id);
+    const previous = { ...ticket };
+    if (title !== undefined) ticket.title = title.trim();
+    if (estimate !== undefined) ticket.estimate = estimate;
+    if (due === "none") delete ticket.due;
+    else if (due !== undefined) ticket.due = due;
     if (waitingOn === "none") delete ticket.waitingOn;
-    else ticket.waitingOn = ticketById(tickets, waitingOn).id;
-    save(cfg, tickets, `set waiting-on for "${ticket.title}" to ${waitingOn}`, by, now);
+    else if (waitingOn !== undefined) ticket.waitingOn = ticketById(tickets, waitingOn).id;
+    const changes: string[] = [];
+    const previousTitle = ticket.title !== previous.title ? previous.title : undefined;
+    if (previousTitle !== undefined) changes.push(`title "${ticket.title}"`);
+    if (ticket.estimate !== previous.estimate) changes.push(`estimate ${ticket.estimate} min`);
+    if (ticket.due !== previous.due) changes.push(ticket.due === undefined ? "due removed" : `due ${ticket.due}`);
+    if (ticket.waitingOn !== previous.waitingOn)
+      changes.push(ticket.waitingOn === undefined ? "waiting on removed" : `waiting on ${ticket.waitingOn}`);
+    const note = changes.length ? `updated "${previous.title}" (${changes.join("; ")})` : `made no changes to "${ticket.title}"`;
+    save(cfg, tickets, note, by, now, { ticket: id, previousTitle });
   });
 }
 export function moveTicket(cfg: Config, id: string, stage: Stage, by = "coordinator", now = Date.now(), proof?: string) {
@@ -97,17 +117,23 @@ export function ticketTimings(tickets: Ticket[], all: Job[], events: Event[], no
   // Only tickets added before IDs were recorded can own a title-only event.
   const added = new Set(history.filter(e => e.key.startsWith(`ticket:${e.time}:added "`)).map(e => e.ticket));
   const legacy = tickets.filter(t => !added.has(t.id));
+  const legacyTitles = legacy.map(ticket => ({
+    ticket,
+    renames: history.filter(e => e.ticket === ticket.id && e.previousTitle !== undefined).sort((a, b) => a.time - b.time),
+  }));
   const times = tickets.map(t => {
     const end = t.stage === "shipped" ? Math.min(now, Date.parse(t.updated)) : now;
     const start = Math.min(Infinity, ...all.filter(j => j.ticket === t.id).map(j => Date.parse(j.started)).filter(at => at <= end));
     if (start > end) return { t, ms: null };
-    const ownsTitle = !added.has(t.id) && legacy.filter(x => x.title === t.title).length === 1;
     const stages = history.flatMap(e => {
       if (e.time > end) return [];
       if (e.ticket !== undefined) return e.ticket === t.id && e.stage ? [{ stage: e.stage, time: e.time }] : [];
-      if (!ownsTitle) return [];
+      if (added.has(t.id)) return [];
       const old = e.text.match(/ (?:added "(.*)" as|moved "(.*)" from (?:ready|building|in review|needs owner|shipped) to) (ready|building|in review|needs owner|shipped)$/);
-      return old && (old[1] ?? old[2]) === t.title ? [{ stage: old[3]!, time: e.time }] : [];
+      if (!old) return [];
+      const owners = legacyTitles.filter(({ ticket, renames }) =>
+        (renames.find(rename => rename.time >= e.time)?.previousTitle ?? ticket.title) === (old[1] ?? old[2]));
+      return owners.length === 1 && owners[0]!.ticket.id === t.id ? [{ stage: old[3]!, time: e.time }] : [];
     }).sort((a, b) => a.time - b.time);
     const updated = Date.parse(t.updated);
     if (updated <= end && stages.at(-1)?.stage !== t.stage && updated >= (stages.at(-1)?.time ?? -Infinity))
@@ -131,7 +157,7 @@ if (import.meta.main) {
     const i = rest.indexOf(name);
     if (i < 0) return;
     const value = rest[i + 1];
-    if (value === undefined || (["--estimate", "--due", "--proof", "--waiting-on"].includes(name) && value.startsWith("--")))
+    if (value === undefined || (["--estimate", "--due", "--proof", "--waiting-on", "--title"].includes(name) && value.startsWith("--")))
       throw Error(`Give a value after ${name}.`);
     rest.splice(i, 2);
     return value;
@@ -145,9 +171,10 @@ if (import.meta.main) {
         estimate: Number(estimate), due, waitingOn: flag("--waiting-on"),
         brief: { job: flag("--job") ?? "", doneMeans: flag("--done") ?? "", whereToLook: flag("--where") ?? "", check: flag("--check") ?? "" } }, by);
     } else if (verb === "set") {
-      const waitingOn = flag("--waiting-on");
-      if (rest.length !== 1 || !waitingOn) throw Error("set needs a ticket id and --waiting-on <id|none>");
-      setWaitingOn(cfg, rest[0]!, waitingOn, by);
+      const waitingOn = flag("--waiting-on"), estimate = flag("--estimate"), due = flag("--due"), title = flag("--title");
+      if (rest.length !== 1 || [waitingOn, estimate, due, title].every(value => value === undefined))
+        throw Error("set needs a ticket id and at least one of --estimate, --due, --title or --waiting-on");
+      setTicket(cfg, rest[0]!, { waitingOn, estimate: estimate === undefined ? undefined : Number(estimate), due, title }, by);
     } else if (verb === "history") {
       if (rest.length !== 1) throw Error("history needs a ticket id");
       const ticket = ticketById(readTickets(cfg), rest[0]!);

@@ -21,6 +21,8 @@ You decide what to do next. The Reins watchdog tells you when something needs at
 8. **Rewrite `state-of-play.md`** when what the owner should know changes. Keep it short.
 
 If a job was stopped at a cap, do not simply relaunch it: read the end of its `log.txt`, narrow the job, then launch.
+To stop a running job when you redirect the work, use `bun run.ts stop <job-id> --reason redirected`.
+Find the job ID in `job.json` in its run folder.
 The launcher asks every job to end its result with exactly `VERDICT: DONE` or `VERDICT: NOT DONE`.
 Read the result and check the work before advancing the ticket; a missing verdict is recorded as unknown.
 Use `--kind investigation` for a question and `--kind specialist` for one-off expert work.

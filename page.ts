@@ -68,6 +68,7 @@ function elapsedOverPredicted(elapsed: number | null, predicted: number | null) 
 function failedInARow(ended: ReturnType<typeof ticketAttempts>) {
   let failures = 0;
   for (const attempt of ended) {
+    if (attempt.outcome === "stopped" && attempt.reasonKind === "redirected") continue;
     if (attempt.achieved === true) break;
     if (attempt.achieved === false || attempt.outcome !== "finished") failures++;
   }
@@ -104,15 +105,13 @@ ${when === null ? "" : `<rect class="tick" x="${position(when)}" width="2" heigh
 
 export function render(s: State, now = Date.now(), ledger: readonly Job[] = []): string {
   const { at, day } = clock(s.timezone), todayDate = day(now);
-  const short = new Intl.DateTimeFormat("en-US", { timeZone: s.timezone, hour: "numeric", minute: "2-digit" });
   const logTime = new Intl.DateTimeFormat("en-GB", { timeZone: s.timezone, hour: "2-digit", minute: "2-digit" });
   const updated = new Intl.DateTimeFormat("en-US", { timeZone: s.timezone, weekday: "short", hour: "numeric", minute: "2-digit" });
   const dueDay = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short" });
-  const since = (ms: number) => `Nothing running since ${todayDate === day(ms) ? short.format(ms) : at(ms)}`;
   const runtime = (j: State["running"][number]) => duration(now - Date.parse(j.started));
   const latestEnd = ledger.reduce((latest, j) => j.ended ? Math.max(latest, Date.parse(j.ended)) : latest, -Infinity);
   const header = s.running.length ? `${s.running.length} job${s.running.length === 1 ? "" : "s"} running`
-    : since(Number.isFinite(latestEnd) ? latestEnd : s.idleSince ?? s.at);
+    : activity(false, duration(now - (Number.isFinite(latestEnd) ? latestEnd : s.pausedSince ?? s.idleSince ?? s.at)));
   const days = (due: string) => (Date.parse(due) - Date.parse(todayDate)) / dayMs;
   const asks = s.ownerAsks.filter(a => !("question" in a) || !askEnded(a, now)).map(a => row("you",
     esc("question" in a ? a.question : a.text), {
@@ -194,7 +193,7 @@ export function render(s: State, now = Date.now(), ledger: readonly Job[] = []):
     + (news.length > 12 ? `<p class="quiet">and ${news.length - 12} earlier</p>` : "") : '<p class="quiet">No events yet today.</p>';
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="refresh" content="60"><title>Reins</title><link rel="stylesheet" href="/style.css"></head><body><main>
-<header><h1>Reins</h1><span class="quiet" title="${esc(at(s.at))}">${esc(header)} · updated ${esc(updated.format(s.at))}</span></header>
+<header><h1>Reins</h1><span class="quiet" title="${esc(at(s.at))}">${header} · updated ${esc(updated.format(s.at))}</span></header>
 <div class="columns"><div class="tickets">${asks.length ? section("Needs you", table("Needs you", asks.join(""), true)) : ""}${section("In progress and due soon", table("Tickets and system status", progress) + week)}</div>
 <div>${section("Usage", usage ? usage + usageKey : '<p class="quiet">No readings yet.</p>')}${section("Today", today)}</div></div>
 </main></body></html>`;
@@ -247,6 +246,7 @@ th:last-child { padding-left:2px }
   .row:has(.waiting) :is(.failures, .now, .num) { align-self:start; min-height:39px; box-sizing:border-box }
 }
 .activity, .waiting { display:flex; align-items:center; gap:7px }
+header .activity { display:inline-flex }
 .activity svg, .waiting svg { width:13px; height:13px; flex:none; fill:currentColor }
 .activity.paused, .waiting { color:var(--quiet) }
 .waiting { align-items:baseline; margin-top:2px; font-size:13px; font-weight:400 }
