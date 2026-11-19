@@ -26,13 +26,13 @@ export async function readBacklog(cfg: Backlog | undefined, previous: BacklogRea
   return { label: cfg.label, count, checkedAt: now } satisfies BacklogReading;
 }
 
-export function reading(id: string, label: string, used: number, start: number | null, resetsAt: number, observedAt: number, detail: string | null = null, forecast?: number): Meter {
-  const p = start === null ? null : pace(used, start, resetsAt, observedAt, forecast);
+export function reading(id: string, label: string, used: number, start: number | null, resetsAt: number | null, observedAt: number, detail: string | null = null, forecast?: number): Meter {
+  const p = start === null || resetsAt === null ? null : pace(used, start, resetsAt, observedAt, forecast);
   return { id, label, used, forecast, detail, start, resetsAt, observedAt, checkedAt: observedAt, verdict: p?.verdict ?? null, runsOutAt: p?.runsOutAt ?? null, unknownSince: null, reason: null };
 }
 /** A failed read: the previous real values, marked with why they are old; or one "unknown since" row. */
 function kept(old: Meter[], id: string, label: string, now: number, reason: string): Meter[] {
-  const real = old.filter(m => m.used !== null && (m.resetsAt ?? 0) > now);
+  const real = old.filter(m => m.used !== null && (m.resetsAt ?? Infinity) > now);
   if (real.length) return real.map(m => ({ ...m, reason, checkedAt: now }));
   return [{ id, label, used: null, detail: null, start: null, resetsAt: null, observedAt: null, checkedAt: now, verdict: null, runsOutAt: null,
     unknownSince: old.find(m => m.used === null)?.unknownSince ?? now, reason }];
@@ -64,12 +64,29 @@ async function harness(cfg: Config, name: ReturnType<typeof enabledProviders>[nu
     return reading(`${name}-${slug(w.name)}`, `${p.label} ${w.name.startsWith("Current ") ? w.name.slice(8) : span}`, w.used, w.minutes ? w.resetsAt - w.minutes * 60000 : null, w.resetsAt, usage.observedAt);
   });
 }
+export async function diskMeter(cfg: Config, previous: Meter[], now: number, run = readCommand) {
+  const id = "disk", label = "Disk on this machine";
+  try {
+    const paths = cfg.workRoots.length ? cfg.workRoots : [cfg.privateDir];
+    const rows = (await run(["df", "-Pk", ...paths])).trimEnd().split("\n").slice(1);
+    if (!rows.length) throw Error();
+    const used = rows.map(row => {
+      const match = row.match(/^.*?\s+\d+\s+\d+\s+\d+\s+(\d+)%\s+/);
+      if (!match) throw Error();
+      return Number(match[1]) / 100;
+    });
+    return reading(id, label, Math.max(...used), null, null, now);
+  } catch {
+    return kept(previous.filter(m => m.id === id), id, label, now, "df could not read the disk")[0]!;
+  }
+}
 export async function readMeters(cfg: Config, previous: Meter[], now: number): Promise<Meter[]> {
-  return (await Promise.all([...enabledProviders(cfg).map(name => harness(cfg, name, previous, now)), ...cfg.extraMeters.map(m => extra(m, previous, now))])).flat();
+  return (await Promise.all([diskMeter(cfg, previous, now), ...enabledProviders(cfg).map(name => harness(cfg, name, previous, now)), ...cfg.extraMeters.map(m => extra(m, previous, now))])).flat();
 }
 /** One plain sentence for a meter; `at` formats a time in the configured timezone. */
 export function meterLine(m: Meter, at: (ms: number) => string): string {
   if (m.used === null) return `${m.label}: unknown since ${at(m.unknownSince ?? m.checkedAt)} (${m.reason})`;
+  if (m.resetsAt === null) return `${m.label}: ${percent(m.used)} used` + (m.reason ? `, as of ${at(m.observedAt!)} because ${m.reason}` : "");
   const fast = m.runsOutAt ? `too fast, runs out ${at(m.runsOutAt)}` : "too fast, forecast to pass the limit before it resets";
   return `${m.label}: ${m.detail ? `${m.detail} (${percent(m.used)})` : `${percent(m.used)} used`}, ${m.verdict === "too fast" ? fast : m.verdict ?? "pace unknown"}`
     + (m.reason ? `, as of ${at(m.observedAt!)} because ${m.reason}` : "");

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, renameSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { loadConfig } from "./config";
@@ -100,12 +100,15 @@ test("the privacy check scans author and committer identities throughout the com
 // Rule: a job past its cap is stopped, so a runaway job cannot keep spending. Made-up job, no model.
 test("a job over its cap is stopped and the ledger says why", async () => {
   const cfg = scratch(), root = cfg.privateDir, fake = join(root, "fake-harness"), prompt = join(root, "p.txt");
-  writeFileSync(join(root, ".env"), `REINS_PRIVATE_DIR="${root}"\nREINS_CONFIG="${join(root, "reins.config.json")}"\n`);
-  writeFileSync(fake, '#!/bin/sh\nprintf "%s:%s\\n" "${REINS_PRIVATE_DIR-unset}" "${REINS_CONFIG-unset}"\nsleep 300\n'); chmodSync(fake, 0o755); writeFileSync(prompt, "made-up prompt");
+  const workRoot = realpathSync(root), cwd = join(workRoot, "checkout"), cache = join(cwd, "node_modules");
+  mkdirSync(cache, { recursive: true });
+  cfg.workRoots = [workRoot];
+  writeFileSync(join(cwd, ".env"), `REINS_PRIVATE_DIR="${root}"\nREINS_CONFIG="${join(root, "reins.config.json")}"\n`);
+  writeFileSync(fake, '#!/bin/sh\nprintf "%s:%s\\n" "${REINS_PRIVATE_DIR-unset}" "${REINS_CONFIG-unset}"\n(trap "" TERM; exec sleep 300) &\nwait\n'); chmodSync(fake, 0o755); writeFileSync(prompt, "made-up prompt");
   Object.assign(process.env, { REINS_FAKE_HARNESS: fake, CODEX_SESSIONS_DIR: join(root, "none") });
   const job = await (async () => {
     Object.assign(process.env, { REINS_PRIVATE_DIR: root, REINS_CONFIG: join(root, "reins.config.json") });
-    try { return await launch(cfg, { kind: "build", name: "Made-up runaway", cwd: root, prompt, capMinutes: 1 }); }
+    try { return await launch(cfg, { kind: "build", name: "Made-up runaway", cwd, prompt, capMinutes: 1 }); }
     finally { delete process.env.REINS_PRIVATE_DIR; delete process.env.REINS_CONFIG; }
   })();
   expect(readFileSync(join(job.dir, "prompt.txt"), "utf8")).toContain('exactly "VERDICT: DONE"');
@@ -118,6 +121,7 @@ test("a job over its cap is stopped and the ledger says why", async () => {
   await pass({ cfg, now: Date.now() + 2 * 60000, meters: async () => [] });
   for (let i = 0; i < 20 && running(); i++) await Bun.sleep(50); // the kernel reaps the group a moment after the signal
   expect(running()).toBe(false);
+  expect(existsSync(cache)).toBe(false);
   expect(log()).toContain("unset:unset");
   expect(jobs(files(cfg).ledger)[0]).toMatchObject({ event: "ended", result: "stopped-cap", outcome: "capped", achieved: null, tokens: null, dir: job.dir });
   expect(readLines<Event>(files(cfg).events).map(e => e.type)).toEqual(["stopped-cap", "wake"]); // one event, one wake
@@ -485,8 +489,8 @@ test("an expired ask leaves the list and the coordinator is told to take the def
   const cfg = scratch({ providers: {} }), now = Date.now();
   const deadline = new Date(now + 60000).toISOString().replace(/\.\d{3}Z$/, "Z");
   const ask = await textOwner(cfg, ["Should the menu open on hover?", "Keep it click-only.", "product taste", deadline, "keep it click-only"], false, now);
-  expect((await completedPass({ cfg, now })).ownerAsks).toHaveLength(1);
-  const state = await completedPass({ cfg, now: now + 60000 });
+  expect((await completedPass({ cfg, meters: async () => [], now })).ownerAsks).toHaveLength(1);
+  const state = await completedPass({ cfg, meters: async () => [], now: now + 60000 });
   expect(state.ownerAsks).toHaveLength(0);
   expect(state.notes[0]).toContain("default due");
   expect(state.notes[0]).toContain("The coordinator has been told.");
@@ -495,7 +499,7 @@ test("an expired ask leaves the list and the coordinator is told to take the def
   expect(takeNews(cfg, text => { wake = text; })).toBe(true);
   expect(wake).toContain("take the default now: keep it click-only");
   updateAsk(cfg, "resolved", ask.key, "Kept it click-only.", now + 60001);
-  expect((await completedPass({ cfg, now: now + 60001 })).notes[0]).toContain("default taken");
+  expect((await completedPass({ cfg, meters: async () => [], now: now + 60001 })).notes[0]).toContain("default taken");
   expect(() => updateAsk(cfg, "resolved", ask.key, "Kept it click-only.", now + 60002)).toThrow();
 });
 

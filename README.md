@@ -20,7 +20,7 @@ in the tools. There are no standing AI "owners" and nothing ever wakes a model t
 
 ## Quick start
 
-Requirements: macOS (launchd is the only scheduler supported so far), [Bun](https://bun.sh), python3 (only for the
+Requirements: macOS (launchd is the only scheduler supported so far), [Bun](https://bun.sh), python3 (for folder cleanup and the
 Claude usage meter), and at least one of Codex or Claude Code, installed and signed in by you. One tool is enough.
 
 ```sh
@@ -130,6 +130,38 @@ The config sets which tools are enabled, their everyday model and effort, named 
 reached, `notify.live` (false means dry-run: nothing leaves this machine; the coordinator's wake file is still written), and optional **extra meters**: a name, a limit, a
 monthly or weekly reset, and a command that prints `{"used": n}` with optional `forecast` and `limit`. With no
 file, every installed tool is enabled and nothing is sent.
+
+### Work folders and disk space
+
+**Disk on this machine** shows the percentage used on the disk holding your private folder.
+If you set `workRoots`, it shows the fullest disk holding one of those folders. The watcher checks
+every 15 minutes and wakes the coordinator when usage reaches `diskAlarmPercent` (default 80).
+The meter has no reset date. Dropping below the threshold arms the alarm again.
+
+Folder cleanup is off until you set `workRoots`. Give it the existing parent folders where jobs
+keep their work, using full paths with no symbolic links. Reserve those roots for job work.
+For example, your config can include:
+
+```json
+{
+  "workRoots": ["~/example-job-work"],
+  "disposableFolders": ["node_modules", ".next", ".turbo"],
+  "diskAlarmPercent": 80
+}
+```
+
+When a job ends, Reins looks inside the work folder it ran in and any new work folders that
+appeared directly under those roots. If jobs overlap, it skips new folders whose owner is unclear.
+It removes folders with the exact names in `disposableFolders`, including nested matches.
+The three names above are the defaults. Stopping a running job also stops its whole process group.
+
+Shipping a ticket removes its recorded Git worktrees only after Git confirms they are clean
+and their commit is reachable from a branch on a remote. Local files (including ignored files)
+or an unavailable remote can keep a worktree in place. The ledger records the reason for a skip,
+and the path and estimated bytes freed for each removal.
+
+Use `bun watch.ts --dry-run` to print the folders a watcher pass would remove. The pass still records
+job endings. Use `bun ticket.ts move <id> shipped --dry-run` to preview worktree removal before shipping.
 
 ## Uninstall
 

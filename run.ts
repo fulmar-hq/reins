@@ -10,6 +10,7 @@ import { enabledProviders, loadConfig, type Config, type ProviderName } from "./
 import { EXIT_NOTE, KINDS, appendLine, files, jobs, processStarted, purposeForKind, withLock, type Job, type Kind } from "./lib";
 import { PROVIDERS } from "./providers";
 import { moveTicketLocked, readTickets } from "./ticket";
+import { snapshot } from "./tidy";
 import { stopRedirected } from "./watch";
 
 export type Launch = {
@@ -39,7 +40,7 @@ export function plan(cfg: Config, o: Launch, dir = "<run folder>") {
 export async function launch(cfg: Config, o: Launch): Promise<Job> {
   plan(cfg, o); // refuse a bad request before creating anything
   const stage = o.kind === "build" || o.kind === "fix" ? "building" : o.kind === "review" ? "in review" : null;
-  return o.ticket && stage
+  return cfg.workRoots.length || o.ticket && stage
     ? withLock(files(cfg).lock, () => startJob(cfg, o, stage))
     : startJob(cfg, o, null);
 }
@@ -68,6 +69,7 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
   const env = { ...process.env };
   delete env.REINS_PRIVATE_DIR;
   delete env.REINS_CONFIG;
+  const work = snapshot(cfg, [o.cwd, dir]);
   let child;
   try {
     child = Bun.spawn([process.execPath, "--no-env-file", import.meta.path, "--record-exit", process.env.REINS_FAKE_HARNESS ?? argv[0]!, ...argv.slice(1)], {
@@ -76,7 +78,7 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
   } finally { closeSync(log); }
   child.unref();
   const job: Job = {
-    event: "started", id: `${day}-${time}-${slug}-${crypto.randomUUID().slice(0, 8)}`, name: o.name.trim(), kind: o.kind, provider, model, effort, ticket: o.ticket ?? null,
+    event: "started", work, id: `${day}-${time}-${slug}-${crypto.randomUUID().slice(0, 8)}`, name: o.name.trim(), kind: o.kind, provider, model, effort, ticket: o.ticket ?? null,
     started: now.toISOString(), ended: null, minutes: null, tokens: null, result: null, reason: null, dir, pid: child.pid, pidStarted: processStarted(child.pid),
     capMinutes: o.capMinutes ?? cfg.caps.minutes, capTokens: o.capTokens ?? cfg.caps.tokens,
   };
@@ -88,8 +90,6 @@ function startJob(cfg: Config, o: Launch, stage: "building" | "in review" | null
 }
 
 if (import.meta.main && process.argv[2] === "--record-exit") {
-  // Stay as group leader during a cap stop, so the watcher can still verify the group if it must escalate.
-  process.on("SIGTERM", () => {});
   let status: number | "signal";
   try {
     const harness = Bun.spawn(process.argv.slice(3), { stdin: "ignore", stdout: "inherit", stderr: "inherit" });

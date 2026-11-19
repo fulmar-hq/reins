@@ -7,6 +7,7 @@ import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "n
 import { join } from "node:path";
 import { enabledProviders, loadConfig, type Config } from "./config";
 import { EXIT_NOTE, KINDS, NO_RESULT, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, slice, ticketAttempts, tryLock, withLock, type Event, type Job, type Outcome, type Result, type Tokens } from "./lib";
+import { tidyJob, tidyShipped } from "./tidy";
 import { meterLine, readBacklog, readMeters, type Meter } from "./meters";
 import { legacyAsks, newsHealth, recordWake, reviewAsksLocked, send, unansweredMinutes, type Message } from "./notify";
 import { PROVIDERS } from "./providers";
@@ -52,17 +53,10 @@ function achievedResult(dir: string): boolean | null {
 }
 /** True only while the recorded process is still this job: same pid, same start time, leading its own group. */
 const alive = (job: Job) => isOurLeader(job.pid, job.pidStarted);
-/** Signal the job's process group only after confirming, right now, that its recorded leader is alive and is ours. */
-function signal(job: Job, name: "SIGTERM" | "SIGKILL"): boolean {
-  if (!alive(job)) return false;
-  try { process.kill(-job.pid, name); return true; } catch { return false; }
-}
-/** Stop a job. Once its leader is gone nothing more is signalled: any children it left are left alone. */
+/** Kill the entire verified group together, while the leader still proves its identity. */
 export function stop(job: Job) {
-  if (!signal(job, "SIGTERM")) return false;
-  for (let i = 0; i < 30 && alive(job); i++) Bun.sleepSync(100);
-  signal(job, "SIGKILL");
-  return true;
+  if (!alive(job)) return false;
+  try { process.kill(-job.pid, "SIGKILL"); return true; } catch { return false; }
 }
 
 type JobEnd = Pick<Job, "result" | "outcome" | "reason" | "reasonKind">;
@@ -70,7 +64,7 @@ type JobEnd = Pick<Job, "result" | "outcome" | "reason" | "reasonKind">;
 const jobLock = (cfg: Config, id: string) => join(cfg.privateDir, `job-${encodeURIComponent(id)}.lock`);
 const runningJob = (ledger: string, id: string) => jobs(ledger).find(j => j.id === id && j.event === "started");
 
-function recordEnd(cfg: Config, job: Job, verdict: JobEnd, now: number) {
+function recordEnd(cfg: Config, job: Job, verdict: JobEnd, now: number, dryRun = false) {
   const started = Date.parse(job.started);
   const tokens = PROVIDERS[job.provider].facts(job.dir, started).tokens;
   const achieved = verdict.outcome === "finished" ? achievedResult(job.dir) : null;
@@ -81,7 +75,10 @@ function recordEnd(cfg: Config, job: Job, verdict: JobEnd, now: number) {
   const text = verdict.outcome === "finished" ? `Finished: ${job.name} (${used}).` : `${summary}: ${job.name}, ${verdict.reason} (${used}).`;
   withLock(f.lock, () => {
     if (!runningJob(f.ledger, job.id)) return;
+    if (job.work && verdict.result !== "ended-unconfirmed") ended.workFolders = tidyJob(cfg, job, dryRun);
     appendLine(f.ledger, ended);
+    if (ended.workFolders?.length && job.ticket && readTickets(cfg).some(t => t.id === job.ticket && t.stage === "shipped"))
+      tidyShipped(cfg, job.ticket, dryRun);
     appendLine(f.events, { key: `job:${job.id}`, at: ended.ended!, type: ended.result!, text, dir: job.dir,
       ...(verdict.reasonKind === "redirected" ? { quiet: true } : {}) } satisfies Event);
   });
@@ -133,7 +130,7 @@ export function stateOfPlay(path: string) {
   return out;
 }
 
-export type Options = { cfg?: Config; now?: number; live?: boolean; meters?: (cfg: Config, previous: Meter[], now: number) => Promise<Meter[]> };
+export type Options = { cfg?: Config; dryRun?: boolean; now?: number; live?: boolean; meters?: (cfg: Config, previous: Meter[], now: number) => Promise<Meter[]> };
 type MeterAlarm = { used: number; resetsAt: number | null; forecastAlarm: boolean; observedAt?: number };
 
 function readState(path: string) {
@@ -183,7 +180,7 @@ async function passLocked(cfg: Config, f: ReturnType<typeof files>, o: Options) 
     try {
       if (!runningJob(f.ledger, job.id)) continue;
       stop(job);
-      recordEnd(cfg, job, verdict, now);
+      recordEnd(cfg, job, verdict, now, o.dryRun);
     } finally { release(); }
   }
 
@@ -209,7 +206,8 @@ async function passLocked(cfg: Config, f: ReturnType<typeof files>, o: Options) 
     const old = meterAlarms.get(m.id), observed = m.observedAt ?? m.checkedAt;
     const crossing = old?.observedAt ?? old?.resetsAt ?? "initial";
     // A jump past several thresholds raises one usage alarm for the highest threshold crossed.
-    const crossed = [1, 0.8, 0.5].find(t => (old?.used ?? 0) < t && m.used! >= t);
+    const thresholds = m.id === "disk" ? [cfg.diskAlarmPercent / 100] : [1, 0.8, 0.5];
+    const crossed = thresholds.find(t => (old?.used ?? 0) < t && m.used! >= t);
     if (crossed) emit(`meter-crossing:${m.id}:${crossed}:after:${crossing}`, "meter", `${m.label} passed ${percent(crossed)}. ${meterLine(m, time.at)}.`);
     const reset = old?.resetsAt != null && m.resetsAt != null && observed >= old.resetsAt
       && m.resetsAt > old.resetsAt && m.used < old.used;
@@ -336,7 +334,7 @@ export type State = NonNullable<Awaited<ReturnType<typeof passLocked>>>;
 
 if (import.meta.main) {
   const cfg = loadConfig(), live = cfg.notify.live && !process.argv.includes("--dry-run");
-  const state = await pass({ cfg, live });
+  const state = await pass({ cfg, live, dryRun: process.argv.includes("--dry-run") });
   if (state) console.log(`${new Date(state.at).toISOString()} ${state.sending}: ${state.running.length} running, ${state.shippedToday.length} shipped today, ${state.errors.length} errors`);
   process.exit(0);
 }
