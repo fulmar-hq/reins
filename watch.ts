@@ -3,12 +3,12 @@
 // changed, send the coordinator at most one batched message per 5 minutes, write state.json for the page.
 // Only the coordinator's ask command texts the owner.
 // bun watch.ts [--dry-run]     Sends only when the config says notify.live and --dry-run is absent.
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { enabledProviders, loadConfig, type Config } from "./config";
-import { EXIT_NOTE, KINDS, NO_RESULT, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, slice, ticketAttempts, withLock, type Event, type Job, type Outcome, type Result, type Tokens } from "./lib";
+import { EXIT_NOTE, KINDS, NO_RESULT, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, slice, ticketAttempts, tryLock, withLock, type Event, type Job, type Outcome, type Result, type Tokens } from "./lib";
 import { meterLine, readBacklog, readMeters, type Meter } from "./meters";
-import { legacyAsks, newsHealth, recordWake, reviewAsks, send, unansweredMinutes, type Message } from "./notify";
+import { legacyAsks, newsHealth, recordWake, reviewAsksLocked, send, unansweredMinutes, type Message } from "./notify";
 import { PROVIDERS } from "./providers";
 import { STAGES, byStage, readTickets, showMinutes, ticketTimings, type Ticket } from "./ticket";
 
@@ -127,8 +127,14 @@ export function stateOfPlay(path: string) {
 export type Options = { cfg?: Config; now?: number; live?: boolean; meters?: (cfg: Config, previous: Meter[], now: number) => Promise<Meter[]> };
 type MeterAlarm = { used: number; resetsAt: number | null; forecastAlarm: boolean; observedAt?: number };
 export async function pass(o: Options = {}) {
-  const cfg = o.cfg ?? loadConfig(), f = files(cfg), now = o.now ?? Date.now(), live = o.live ?? false, time = clock(cfg.timezone);
-  mkdirSync(cfg.privateDir, { recursive: true });
+  const cfg = o.cfg ?? loadConfig(), f = files(cfg);
+  const release = tryLock(f.lock);
+  if (!release) return;
+  try { return await passLocked(cfg, f, o); } finally { release(); }
+}
+
+async function passLocked(cfg: Config, f: ReturnType<typeof files>, o: Options) {
+  const now = o.now ?? Date.now(), live = o.live ?? false, time = clock(cfg.timezone);
   let previous: any = {};
   try { previous = JSON.parse(readFileSync(f.state, "utf8")); } catch { /* first pass, or a torn file */ }
   const stored = readLines<Event>(f.events), seen = new Set(stored.map(e => e.key)), errors: string[] = [];
@@ -137,22 +143,17 @@ export async function pass(o: Options = {}) {
     const event: Event = { key, at: new Date(now).toISOString(), type, text, ...extra };
     seen.add(key); appendLine(f.events, event);
   };
-  const emitAlarm = (key: string, type: string, text: string) => withLock(f.lock, () => {
-    if (!readLines<Event>(f.events).some(e => e.key === key)) emit(key, type, text);
-  });
 
   // 1. Jobs: finished, silent or over cap.
   const running: (Job & { minutesSoFar: number })[] = [];
-  for (const candidate of jobs(f.ledger).filter(j => j.event === "started")) withLock(f.lock, () => {
-    const job = jobs(f.ledger).find(j => j.id === candidate.id);
-    if (job?.event !== "started") return;
+  for (const job of jobs(f.ledger).filter(j => j.event === "started")) {
     const provider = PROVIDERS[job.provider], started = Date.parse(job.started), facts = provider.facts(job.dir, started);
     const finishedAt = provider.finished(job.dir) ? statSync(join(job.dir, "result.txt")).mtimeMs : 0;
     const verdict = judge(job, { alive: alive(job), pidInUse: processStarted(job.pid) !== "", finishedAt, exit: harnessExit(job.dir), ...facts }, now, cfg.caps.silentMinutes);
-    if (!verdict) { running.push({ ...job, tokens: facts.tokens, minutesSoFar: minutesBetween(started, now) }); return; }
+    if (!verdict) { running.push({ ...job, tokens: facts.tokens, minutesSoFar: minutesBetween(started, now) }); continue; }
     stop(job);
     recordEnd(cfg, job, verdict, now);
-  });
+  }
 
   // 2. Meters, refreshed every 15 minutes; between refreshes the last reading stands.
   let meters: Meter[] = previous.meters ?? [], metersAt: number = previous.metersAt ?? 0;
@@ -174,18 +175,17 @@ export async function pass(o: Options = {}) {
   for (const m of meters) {
     if (m.used === null || m.reason) continue; // only a fresh real reading can raise an event
     const old = meterAlarms.get(m.id), observed = m.observedAt ?? m.checkedAt;
-    // Overlapping reads can have different timestamps but share the reading they crossed from.
     const crossing = old?.observedAt ?? old?.resetsAt ?? "initial";
     // A jump past several thresholds raises one usage alarm for the highest threshold crossed.
     const crossed = [1, 0.8, 0.5].find(t => (old?.used ?? 0) < t && m.used! >= t);
-    if (crossed) emitAlarm(`meter-crossing:${m.id}:${crossed}:after:${crossing}`, "meter", `${m.label} passed ${percent(crossed)}. ${meterLine(m, time.at)}.`);
+    if (crossed) emit(`meter-crossing:${m.id}:${crossed}:after:${crossing}`, "meter", `${m.label} passed ${percent(crossed)}. ${meterLine(m, time.at)}.`);
     const reset = old?.resetsAt != null && m.resetsAt != null && observed >= old.resetsAt
       && m.resetsAt > old.resetsAt && m.used < old.used;
     // Forecast changes alone never rearm this warning. A new window or recovery from the actual cap can.
     const recovered = (old?.used ?? 0) >= 1 && m.used < 1;
     let forecastAlarm = !!old?.forecastAlarm && !reset && !recovered;
     if (!forecastAlarm && m.verdict === "too fast") {
-      emitAlarm(`pace-crossing:${m.id}:after:${crossing}`, "too-fast", `${meterLine(m, time.at)}, before it resets ${time.at(m.resetsAt!)}.`);
+      emit(`pace-crossing:${m.id}:after:${crossing}`, "too-fast", `${meterLine(m, time.at)}, before it resets ${time.at(m.resetsAt!)}.`);
       forecastAlarm = true;
     }
     meterAlarms.set(m.id, { used: m.used, resetsAt: m.resetsAt, forecastAlarm, observedAt: observed });
@@ -230,14 +230,14 @@ export async function pass(o: Options = {}) {
   });
 
   // 4. Review open asks and notify the coordinator: one batched message per 5 minutes.
-  const shipped = ended.filter(j => j.result === "finished"), play = stateOfPlay(f.stateOfPlay), ownerAsks = reviewAsks(cfg, now);
+  const shipped = ended.filter(j => j.result === "finished"), play = stateOfPlay(f.stateOfPlay), ownerAsks = reviewAsksLocked(cfg, now);
   // A lost state file must not replay old events: everything already stored counts as delivered.
   let cursor: Cursor = previous.notify ?? { delivered: stored.length, lastMailAt: 0 };
   const outbox: (Message & { at: string; outcome: string })[] = previous.outbox ?? [];
   const pending = readLines<Event>(f.events), next = batch(pending, cursor, now);
   try {
     for (const message of next.messages) {
-      const outcome = await send(cfg, message, live);
+      const outcome = await send(cfg, message, live, { lockHeld: true });
       outbox.push({ ...message, at: new Date(now).toISOString(), outcome });
       if (outcome === "sent") recordWake(f.events, message.summary);
       if (outcome === "sent" || outcome === "written") for (const e of pending.slice(cursor.delivered, next.cursor.delivered)) {
@@ -277,11 +277,11 @@ export async function pass(o: Options = {}) {
   renameSync(f.state + ".tmp", f.state);
   return state;
 }
-export type State = Awaited<ReturnType<typeof pass>>;
+export type State = Awaited<ReturnType<typeof passLocked>>;
 
 if (import.meta.main) {
   const cfg = loadConfig(), live = cfg.notify.live && !process.argv.includes("--dry-run");
   const state = await pass({ cfg, live });
-  console.log(`${new Date(state.at).toISOString()} ${state.sending}: ${state.running.length} running, ${state.shippedToday.length} shipped today, ${state.errors.length} errors`);
+  if (state) console.log(`${new Date(state.at).toISOString()} ${state.sending}: ${state.running.length} running, ${state.shippedToday.length} shipped today, ${state.errors.length} errors`);
   process.exit(0);
 }

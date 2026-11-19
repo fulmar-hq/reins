@@ -7,7 +7,7 @@ import { appendLine, files, readLines, withLock, type Ask, type Event } from "./
 export type Message = { to: "coordinator" | "owner"; summary: string; body: string };
 
 /** Deliver one message on a configured channel. Returns what happened, in a word or two; throws when it fails. */
-export async function send(cfg: Config, message: Message, live: boolean): Promise<string> {
+export async function send(cfg: Config, message: Message, live: boolean, { lockHeld = false } = {}): Promise<string> {
   const channel: Channel = cfg.notify[message.to];
   if (channel.channel === "none") return "no channel configured";
   const text = message.body ? `${message.summary}\n${message.body}` : message.summary;
@@ -15,10 +15,12 @@ export async function send(cfg: Config, message: Message, live: boolean): Promis
   if (channel.channel === "file") {
     // The coordinator chat runs wait.ts in the background; it returns whatever has not been handed over yet.
     const f = files(cfg);
-    withLock(f.lock, () => {
+    const writeWake = () => {
       appendFileSync(f.wake, `--- ${new Date().toISOString()}\n${text}\n`, { mode: 0o600 });
       if (message.to === "coordinator") recordWake(f.events, message.summary);
-    });
+    };
+    if (lockHeld) writeWake();
+    else withLock(f.lock, writeWake);
     return "written";
   }
   if (channel.channel === "command") {
@@ -141,9 +143,10 @@ export function updateAsk(cfg: Config, action: "resolved" | "reconfirm", id: str
   });
 }
 
-export function reviewAsks(cfg: Config, now: number): OpenAsk[] {
+/** The caller holds the write lock. */
+export function reviewAsksLocked(cfg: Config, now: number): OpenAsk[] {
   const f = files(cfg);
-  return withLock(f.lock, () => openAsks(readLines<Event>(f.events)).filter(ask => {
+  return openAsks(readLines<Event>(f.events)).filter(ask => {
     const ended = askEnded(ask, now);
     const label = `${ask.id} · ${ask.question}`;
     if (ended === "owner-default")
@@ -155,7 +158,7 @@ export function reviewAsks(cfg: Config, now: number): OpenAsk[] {
       ask.reviewBy = now + day;
     }
     return !ended;
-  }));
+  });
 }
 
 /** Accept the ask and reserve its text slot together under the existing lock.

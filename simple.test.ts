@@ -26,6 +26,12 @@ const scratch = (extra: Record<string, unknown> = {}) => {
 };
 const sampleAsk = ["Can you sign in again?", "Renew the existing sign-in.", "sign-in or credential", "--no-safe-default"];
 
+async function completedPass(options: Parameters<typeof pass>[0]): Promise<State> {
+  const state = await pass(options);
+  if (!state) throw Error("Expected the watcher to complete the pass");
+  return state;
+}
+
 test("a config loaded from another folder never touches the folder named by the environment", () => {
   const root = mkdtempSync(join(tmpdir(), "reins-config-"));
   const explicit = join(root, "explicit"), inherited = join(root, "inherited");
@@ -160,9 +166,31 @@ test("meter alarms rearm on usage recovery and ignore forecast swings", async ()
 
   await check(0.49, 0.9);
   const priorAlarms = alarms().length;
-  await Promise.all([now, now + 1].map(at => pass({
-    cfg, now: at, meters: async () => [reading("example", "Example meter", 1, start, reset, at)],
-  })));
+  const paths = files(cfg), previousState = readFileSync(paths.state, "utf8"), previousEvents = readFileSync(paths.events, "utf8");
+  const abandoned = Bun.spawnSync([process.execPath, "--no-env-file", "-e",
+    'import { tryLock } from "./lib"; if (!tryLock(process.argv[1]!)) process.exit(1);',
+    paths.lock], { cwd: import.meta.dir });
+  expect(abandoned.exitCode).toBe(0);
+  expect(existsSync(paths.lock)).toBe(true);
+
+  const meter = Promise.withResolvers<ReturnType<typeof reading>[]>();
+  let readingMeter = false, newerReadMeter = false;
+  const older = pass({ cfg, now, meters: () => { readingMeter = true; return meter.promise; } });
+  try {
+    expect(readingMeter).toBe(true); // The abandoned lock was recovered.
+    utimesSync(paths.lock, 0, 0);
+    const newer = await pass({ cfg, now: now + 1, meters: async () => {
+      newerReadMeter = true;
+      return [reading("example", "Example meter", 0.8, start, reset, now + 1)];
+    } });
+    expect(newer).toBeUndefined();
+    expect(newerReadMeter).toBe(false);
+    expect(readFileSync(paths.state, "utf8")).toBe(previousState);
+    expect(readFileSync(paths.events, "utf8")).toBe(previousEvents);
+  } finally {
+    meter.resolve([reading("example", "Example meter", 1, start, reset, now)]);
+    expect((await older)?.meterAlarms.example).toMatchObject({ used: 1, observedAt: now });
+  }
   expect(alarms().slice(priorAlarms).map(e => e.text.split(". ")[0])).toEqual(["Example meter passed 100%"]);
   now += gap + 1;
   await check(0.49, 0.9);
@@ -193,7 +221,7 @@ test("pace verdict arithmetic", async () => {
     reading("ahead", "Ahead", 0.7, start, reset, 3 * day),
     reading("full", "Full", 1, start, reset, now),
   ];
-  const html = render(await pass({ cfg, now, meters: async () => meters }), now);
+  const html = render(await completedPass({ cfg, now, meters: async () => meters }), now);
   expect(html).toContain('aria-label="30% used · 70% by reset · 57% today"');
   expect(html).toContain('class="bar soon"');
   expect(html).toContain('class="bar late"');
@@ -230,7 +258,7 @@ test("a ticket without an estimate is never late by pace", async () => {
     readLines<Event>(files(cfg).events), now).get("legacy");
   expect(timing).toEqual({ elapsed: 60, predicted: null, state: null });
 
-  const state = await pass({ cfg, now, meters: async () => [] });
+  const state = await completedPass({ cfg, now, meters: async () => [] });
   const oldState = { ...state, tickets: state.tickets.map(t => t.id === "legacy"
     ? { ...t, timing: { elapsed: 60, predicted: 10, state: "very over" as const } } : t) };
   const row = render(oldState, now);
@@ -356,8 +384,8 @@ test("an expired ask leaves the list and the coordinator is told to take the def
   const cfg = scratch({ providers: {} }), now = Date.now();
   const deadline = new Date(now + 60000).toISOString().replace(/\.\d{3}Z$/, "Z");
   const ask = await textOwner(cfg, ["Should the menu open on hover?", "Keep it click-only.", "product taste", deadline, "keep it click-only"], false, now);
-  expect((await pass({ cfg, now })).ownerAsks).toHaveLength(1);
-  const state = await pass({ cfg, now: now + 60000 });
+  expect((await completedPass({ cfg, now })).ownerAsks).toHaveLength(1);
+  const state = await completedPass({ cfg, now: now + 60000 });
   expect(state.ownerAsks).toHaveLength(0);
   expect(state.notes[0]).toContain("default due");
   expect(state.notes[0]).toContain("The coordinator has been told.");
@@ -366,7 +394,7 @@ test("an expired ask leaves the list and the coordinator is told to take the def
   expect(takeNews(cfg, text => { wake = text; })).toBe(true);
   expect(wake).toContain("take the default now: keep it click-only");
   updateAsk(cfg, "resolved", ask.key, "Kept it click-only.", now + 60001);
-  expect((await pass({ cfg, now: now + 60001 })).notes[0]).toContain("default taken");
+  expect((await completedPass({ cfg, now: now + 60001 })).notes[0]).toContain("default taken");
   expect(() => updateAsk(cfg, "resolved", ask.key, "Kept it click-only.", now + 60002)).toThrow();
 });
 
@@ -392,7 +420,7 @@ test("coordinator news is handed over once and never lost", async () => {
 test("waiting news is reported until the coordinator takes it", async () => {
   const cfg = scratch({ notify: { unansweredMinutes: 2 } });
   await send(cfg, { to: "coordinator", summary: "Made-up finish", body: "" }, false);
-  const now = Date.now(), watch = (minutes: number) => pass({ cfg, now: now + minutes * 60000, meters: async () => [] });
+  const now = Date.now(), watch = (minutes: number) => completedPass({ cfg, now: now + minutes * 60000, meters: async () => [] });
   expect((await watch(1)).wakeWarning).toBeNull();
   const state = await watch(3);
   expect(render(state, state.at)).toContain('title="News has been waiting 3 minutes; nobody is listening: start bun wait.ts"');
@@ -423,7 +451,7 @@ test("a very over ticket is stuck unless a job is running on it", async () => {
   const job = { event: "ended", id: "first", ticket: "demo", kind: "build", name: "Check route", started,
     ended: new Date(now - 60000).toISOString(), result: "stopped-cap", reason: "minute cap reached" } as Job;
   appendLine(files(cfg).ledger, job);
-  const state = await pass({ cfg, now, meters: async () => [] });
+  const state = await completedPass({ cfg, now, meters: async () => [] });
   expect(render(state, now, [job])).toContain('class="sr-only">Late, idle. </span>Trace a route');
   const running = { ...job, model: null, effort: null, id: "second", started: new Date(now - 60000).toISOString(), ended: null, minutes: 1,
     event: "started", result: null, reason: null } as const;
@@ -431,13 +459,13 @@ test("a very over ticket is stuck unless a job is running on it", async () => {
 });
 
 test("Needs you is absent with no open asks", async () => {
-  const now = Date.parse("2030-01-01T10:00:00Z"), state = await pass({ cfg: scratch(), now, meters: async () => [] });
+  const now = Date.parse("2030-01-01T10:00:00Z"), state = await completedPass({ cfg: scratch(), now, meters: async () => [] });
   expect(render(state, now)).not.toContain("Needs you");
 });
 
 test("the header uses the pause icon and elapsed time until jobs run", async () => {
   const cfg = scratch({ providers: {} }), start = Date.parse("2030-01-01T10:00:00Z");
-  const watch = (now: number) => pass({ cfg, now, meters: async () => [] });
+  const watch = (now: number) => completedPass({ cfg, now, meters: async () => [] });
   await watch(start);
   const now = start + 17 * 60000, state = await watch(now);
   const header = (html: string) => html.match(/<header>.*?<\/header>/)?.[0];
@@ -451,7 +479,7 @@ test("a ticket due within 3 days appears as an at-risk row even when not started
   addTicket(cfg, { id: "source", title: "Collect feedback" }, "test", now);
   addTicket(cfg, { id: "draft", title: "Draft guide", estimate: 30, due: "2030-01-04", waitingOn: "source" }, "test", now);
   addTicket(cfg, { id: "later", title: "Publish guide", due: "2030-01-05" }, "test", now);
-  const state = await pass({ cfg, now, meters: async () => [] });
+  const state = await completedPass({ cfg, now, meters: async () => [] });
   const html = render(state, now);
   const row = html.match(/<tr role="row" class="row">[^]*?Draft guide[^]*?<\/tr>/)?.[0];
   expect(row).toContain('class="dot soon"');
@@ -466,7 +494,7 @@ test("a ticket due within 3 days appears as an at-risk row even when not started
 test("failed in a row skips redirects and unknown verdicts and resets only after DONE", async () => {
   const cfg = scratch(), now = Date.parse("2030-01-01T10:00:00Z");
   addTicket(cfg, { id: "demo", title: "Check the index", stage: "building" }, "test", now - 60000);
-  const state = await pass({ cfg, now, meters: async () => [] });
+  const state = await completedPass({ cfg, now, meters: async () => [] });
   const attempt = (id: number, outcome: Job["outcome"], achieved?: Job["achieved"]) => ({
     id: String(id), ticket: "demo", kind: "build", name: "Check", event: outcome ? "ended" : "started", outcome, achieved,
     started: new Date(now - 60000 + id * 1000).toISOString(), ended: outcome ? new Date(now - 50000 + id * 1000).toISOString() : null,
@@ -507,7 +535,7 @@ test("the week starts at Monday midnight in the configured timezone", async () =
   addTicket(cfg, { id: "due", title: "Imminent delivery", due: "2030-01-09" }, "test", first);
   addTicket(cfg, { id: "active", title: "Active delivery" }, "test", first);
   for (let i = 1; i <= 5; i++) addTicket(cfg, { id: `queued-${i}`, title: `Queued delivery ${i}` }, "test", first);
-  const state = await pass({ cfg, now, meters: async () => [] });
+  const state = await completedPass({ cfg, now, meters: async () => [] });
   const active: State["running"][number] = {
     id: "active-job", name: "Check delivery", kind: "investigation", provider: "codex", model: null, effort: null, ticket: "active",
     started: new Date(monday).toISOString(), ended: null, minutes: 30, capMinutes: 60, capTokens: 500000,

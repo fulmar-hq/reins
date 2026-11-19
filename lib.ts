@@ -1,6 +1,6 @@
 // Shared plain-file helpers for Reins. No model call anywhere in this project.
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { Config, ProviderName } from "./config";
 
 export const KINDS = ["build", "review", "fix", "investigation", "specialist"] as const;
@@ -96,17 +96,65 @@ export function isOurLeader(pid: number, started: string): boolean {
   const same = processes().find(p => p.pid === pid);
   return Boolean(same) && started !== "" && same!.started === started && same!.pgid === pid;
 }
-/** Run `work` while holding an exclusive lock folder, so check-then-write on shared files has one writer at a time.
- *  Every path is bounded by `timeoutMs`; when the lock cannot be taken in time this throws and nothing is done. */
+let lockOwnerStarted: string | undefined;
+
+function clearDeadLock(path: string) {
+  try {
+    const entries = readdirSync(path), owner = entries.length === 1 && entries[0]!;
+    const match = owner && /^owner-([1-9]\d*)-[a-zA-Z0-9]+$/.exec(owner);
+    if (match && owner) {
+      const pid = Number(match[1]), marker = join(path, owner);
+      if (pid === process.pid) return;
+      const started = readFileSync(marker, "utf8");
+      let dead = false;
+      try { process.kill(pid, 0); } catch (error) { dead = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+      if (!dead && started) {
+        const current = processStarted(pid);
+        dead = current !== "" && current !== started;
+      }
+      if (!dead) return;
+      // Only the contender that removes this owner's unique marker may clear its folder.
+      unlinkSync(marker);
+    } else if (entries.length || Date.now() - mtime(path) <= 30000) return;
+    rmdirSync(path);
+  } catch { /* The folder changed while we inspected it, or could not be cleared. */ }
+}
+
+/** Try to take the shared write lock once, recovering a dead owner's lock along the way. */
+export function tryLock(path: string): (() => void) | undefined {
+  mkdirSync(dirname(path), { recursive: true });
+  clearDeadLock(path);
+  if (existsSync(path)) return;
+  const pending = mkdtempSync(join(dirname(path), `owner-${process.pid}-`)), owner = basename(pending);
+  const marker = join(pending, owner);
+  try {
+    // Publish a populated folder atomically. A concurrent owner's nonempty folder cannot be replaced.
+    writeFileSync(marker, lockOwnerStarted ??= processStarted(process.pid));
+    renameSync(pending, path);
+  } catch (error) {
+    if (existsSync(marker)) unlinkSync(marker);
+    rmdirSync(pending);
+    if (["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) return;
+    throw error;
+  }
+  return () => {
+    unlinkSync(join(path, owner));
+    try { rmdirSync(path); } catch (error) {
+      // Another contender may already have replaced the now-empty folder.
+      if (!["ENOENT", "EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    }
+  };
+}
+
+/** Run synchronous work under the shared write lock, waiting at most `timeoutMs` to take it. */
 export function withLock<T>(path: string, work: () => T, timeoutMs = 5000): T {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    try { mkdirSync(dirname(path), { recursive: true }); mkdirSync(path); break; } catch { /* held by someone else, or not creatable */ }
-    if (Date.now() - mtime(path) > 30000) try { rmdirSync(path); continue; } catch { /* a stale lock that cannot be removed: keep to the deadline */ }
+    const release = tryLock(path);
+    if (release) try { return work(); } finally { release(); }
     if (Date.now() >= deadline) throw Error(`Could not take the lock ${path} within ${Math.round(timeoutMs / 1000)} seconds; nothing was done.`);
     Bun.sleepSync(25);
   }
-  try { return work(); } finally { try { rmdirSync(path); } catch { /* already cleared */ } }
 }
 
 export type Pace = { verdict: "plenty left" | "on track" | "too fast"; runsOutAt: number | null };
