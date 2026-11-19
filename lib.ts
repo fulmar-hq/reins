@@ -1,6 +1,6 @@
 // Shared plain-file helpers for Reins. No model call anywhere in this project.
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rmdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { Config, ProviderName } from "./config";
 
 export const KINDS = ["build", "review", "fix", "investigation", "specialist"] as const;
@@ -30,6 +30,7 @@ export type Event = { key: string; at: string; type: string; text: string; dir?:
 export const files = (cfg: Config) => ({
   ledger: join(cfg.privateDir, "ledger.jsonl"), events: join(cfg.privateDir, "events.jsonl"), state: join(cfg.privateDir, "state.json"),
   stateOfPlay: join(cfg.privateDir, "state-of-play.md"), jobs: join(cfg.privateDir, "work/jobs"), lock: join(cfg.privateDir, "write.lock"),
+  passLock: join(cfg.privateDir, "watch.lock"),
   wake: cfg.notify.coordinator.channel === "file" && cfg.notify.coordinator.file || join(cfg.privateDir, "wake.txt"),
 });
 
@@ -82,31 +83,89 @@ export async function exec(argv: string[], options: { cwd?: string; timeoutMs?: 
   if (code !== 0) throw Error(`${argv[0]} exited ${code}`);
   return out;
 }
-type Row = { pid: number; pgid: number; started: string };
-const processes = (): Row[] => Bun.spawnSync(["ps", "-A", "-o", "pid=,pgid=,stat=,lstart="]).stdout.toString().split("\n").flatMap(line => {
+type Row = { pid: number; pgid: number; stat: string; started: string };
+const processes = (env = process.env): Row[] => Bun.spawnSync(["ps", "-A", "-o", "pid=,pgid=,stat=,lstart="], { env }).stdout.toString().split("\n").flatMap(line => {
   const [pid, pgid, stat = "", ...started] = line.trim().split(/\s+/);
-  return pid && !stat.startsWith("Z") ? [{ pid: Number(pid), pgid: Number(pgid), started: started.join(" ") }] : []; // a finished, unreaped process is not alive
+  return pid ? [{ pid: Number(pid), pgid: Number(pgid), stat, started: started.join(" ") }] : [];
 });
+const liveProcess = (pid: number) => processes().find(p => p.pid === pid && !p.stat.startsWith("Z"));
 /** When the live process with this pid started, as `ps` prints it; "" when there is none. */
-export const processStarted = (pid: number) => processes().find(p => p.pid === pid)?.started ?? "";
+export const processStarted = (pid: number) => liveProcess(pid)?.started ?? "";
 /** True only when the recorded process itself is alive: same pid, same recorded start time, still leading its own group.
  *  This is the only condition under which a job may be signalled. Leftover children of a leader that has gone are never
  *  enough, because nothing then proves the group is still ours. */
 export function isOurLeader(pid: number, started: string): boolean {
-  const same = processes().find(p => p.pid === pid);
+  const same = liveProcess(pid);
   return Boolean(same) && started !== "" && same!.started === started && same!.pgid === pid;
 }
-/** Run `work` while holding an exclusive lock folder, so check-then-write on shared files has one writer at a time.
- *  Every path is bounded by `timeoutMs`; when the lock cannot be taken in time this throws and nothing is done. */
+const lockProcesses = () => processes({ ...process.env, TZ: "UTC", LC_ALL: "C" });
+const lockStartPrefix = "UTC:";
+let lockOwnerStarted: string | undefined;
+
+function clearDeadLock(path: string) {
+  try {
+    const entries = readdirSync(path), owner = entries.length === 1 && entries[0]!;
+    const match = owner && /^owner-([1-9]\d*)-[a-zA-Z0-9]+$/.exec(owner);
+    if (match && owner) {
+      const pid = Number(match[1]), marker = join(path, owner);
+      if (pid === process.pid) return;
+      const started = readFileSync(marker, "utf8");
+      let dead = false;
+      try { process.kill(pid, 0); } catch (error) { dead = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+      if (!dead) {
+        const current = lockProcesses().find(p => p.pid === pid);
+        // Older markers used local time, so their timestamps cannot prove that a live PID was reused.
+        dead = !!current && (current.stat.startsWith("Z")
+          || started.startsWith(lockStartPrefix) && current.started !== "" && lockStartPrefix + current.started !== started);
+      }
+      if (!dead) return;
+      // Only the contender that removes this owner's unique marker may clear its folder.
+      unlinkSync(marker);
+    } else if (entries.length || Date.now() - mtime(path) <= 30000) return;
+    rmdirSync(path);
+  } catch { /* The folder changed while we inspected it, or could not be cleared. */ }
+}
+
+/** Try to take a lock once, recovering a dead owner's lock along the way. */
+export function tryLock(path: string): (() => void) | undefined {
+  mkdirSync(dirname(path), { recursive: true });
+  clearDeadLock(path);
+  if (existsSync(path)) return;
+  const pending = mkdtempSync(join(dirname(path), `owner-${process.pid}-`)), owner = basename(pending);
+  const marker = join(pending, owner);
+  try {
+    // Publish a populated folder atomically. A concurrent owner's nonempty folder cannot be replaced.
+    lockOwnerStarted ??= lockProcesses().find(p => p.pid === process.pid)?.started ?? "";
+    writeFileSync(marker, lockOwnerStarted ? lockStartPrefix + lockOwnerStarted : "");
+    renameSync(pending, path);
+  } catch (error) {
+    if (existsSync(marker)) unlinkSync(marker);
+    rmdirSync(pending);
+    if (["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) return;
+    throw error;
+  }
+  return () => {
+    try { unlinkSync(join(path, owner)); } catch (error) {
+      // Our marker can be gone if the lock folder was removed or moved.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    try { rmdirSync(path); } catch (error) {
+      // Another contender may already have replaced the now-empty folder.
+      if (!["ENOENT", "EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    }
+  };
+}
+
+/** Run synchronous work under the shared write lock, waiting at most `timeoutMs` to take it. */
 export function withLock<T>(path: string, work: () => T, timeoutMs = 5000): T {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    try { mkdirSync(dirname(path), { recursive: true }); mkdirSync(path); break; } catch { /* held by someone else, or not creatable */ }
-    if (Date.now() - mtime(path) > 30000) try { rmdirSync(path); continue; } catch { /* a stale lock that cannot be removed: keep to the deadline */ }
+    const release = tryLock(path);
+    if (release) try { return work(); } finally { release(); }
     if (Date.now() >= deadline) throw Error(`Could not take the lock ${path} within ${Math.round(timeoutMs / 1000)} seconds; nothing was done.`);
     Bun.sleepSync(25);
   }
-  try { return work(); } finally { try { rmdirSync(path); } catch { /* already cleared */ } }
 }
 
 export type Pace = { verdict: "plenty left" | "on track" | "too fast"; runsOutAt: number | null };

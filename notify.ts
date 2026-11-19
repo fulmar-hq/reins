@@ -141,9 +141,10 @@ export function updateAsk(cfg: Config, action: "resolved" | "reconfirm", id: str
   });
 }
 
-export function reviewAsks(cfg: Config, now: number): OpenAsk[] {
+/** The caller holds the write lock. */
+export function reviewAsksLocked(cfg: Config, now: number): OpenAsk[] {
   const f = files(cfg);
-  return withLock(f.lock, () => openAsks(readLines<Event>(f.events)).filter(ask => {
+  return openAsks(readLines<Event>(f.events)).filter(ask => {
     const ended = askEnded(ask, now);
     const label = `${ask.id} · ${ask.question}`;
     if (ended === "owner-default")
@@ -155,7 +156,7 @@ export function reviewAsks(cfg: Config, now: number): OpenAsk[] {
       ask.reviewBy = now + day;
     }
     return !ended;
-  }));
+  });
 }
 
 /** Accept the ask and reserve its text slot together under the existing lock.

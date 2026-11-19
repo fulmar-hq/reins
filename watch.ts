@@ -3,12 +3,12 @@
 // changed, send the coordinator at most one batched message per 5 minutes, write state.json for the page.
 // Only the coordinator's ask command texts the owner.
 // bun watch.ts [--dry-run]     Sends only when the config says notify.live and --dry-run is absent.
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { enabledProviders, loadConfig, type Config } from "./config";
-import { EXIT_NOTE, KINDS, NO_RESULT, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, slice, ticketAttempts, withLock, type Event, type Job, type Outcome, type Result, type Tokens } from "./lib";
+import { EXIT_NOTE, KINDS, NO_RESULT, appendLine, clock, count, files, isOurLeader, jobs, percent, processStarted, readLines, slice, ticketAttempts, tryLock, withLock, type Event, type Job, type Outcome, type Result, type Tokens } from "./lib";
 import { meterLine, readBacklog, readMeters, type Meter } from "./meters";
-import { legacyAsks, newsHealth, recordWake, reviewAsks, send, unansweredMinutes, type Message } from "./notify";
+import { legacyAsks, newsHealth, recordWake, reviewAsksLocked, send, unansweredMinutes, type Message } from "./notify";
 import { PROVIDERS } from "./providers";
 import { STAGES, byStage, readTickets, showMinutes, ticketTimings, type Ticket } from "./ticket";
 
@@ -66,25 +66,34 @@ export function stop(job: Job) {
 }
 
 type JobEnd = Pick<Job, "result" | "outcome" | "reason" | "reasonKind">;
+// A watcher and a manual redirect can both close a job. Only they need to wait for its process.
+const jobLock = (cfg: Config, id: string) => join(cfg.privateDir, `job-${encodeURIComponent(id)}.lock`);
+const runningJob = (ledger: string, id: string) => jobs(ledger).find(j => j.id === id && j.event === "started");
+
 function recordEnd(cfg: Config, job: Job, verdict: JobEnd, now: number) {
   const started = Date.parse(job.started);
   const tokens = PROVIDERS[job.provider].facts(job.dir, started).tokens;
   const achieved = verdict.outcome === "finished" ? achievedResult(job.dir) : null;
   const ended: Job = { ...job, event: "ended", ended: new Date(now).toISOString(), minutes: minutesBetween(started, now), tokens, ...verdict, achieved };
   const f = files(cfg);
-  appendLine(f.ledger, ended);
   const used = `${ended.minutes} min, ${count(tokens?.fresh)} tokens`;
   const summary = verdict.outcome === "failed" ? "Failed" : "Stopped";
   const text = verdict.outcome === "finished" ? `Finished: ${job.name} (${used}).` : `${summary}: ${job.name}, ${verdict.reason} (${used}).`;
-  appendLine(f.events, { key: `job:${job.id}`, at: ended.ended!, type: ended.result!, text, dir: job.dir,
-    ...(verdict.reasonKind === "redirected" ? { quiet: true } : {}) } satisfies Event);
+  withLock(f.lock, () => {
+    if (!runningJob(f.ledger, job.id)) return;
+    appendLine(f.ledger, ended);
+    appendLine(f.events, { key: `job:${job.id}`, at: ended.ended!, type: ended.result!, text, dir: job.dir,
+      ...(verdict.reasonKind === "redirected" ? { quiet: true } : {}) } satisfies Event);
+  });
 }
 
 export function stopRedirected(cfg: Config, id: string, now = Date.now()) {
   const f = files(cfg);
-  withLock(f.lock, () => {
-    const job = jobs(f.ledger).find(j => j.id === id);
-    if (!job || job.event !== "started" || !stop(job)) throw Error("There is no running job with that ID.");
+  const missing = "There is no running job with that ID.";
+  if (!runningJob(f.ledger, id)) throw Error(missing);
+  withLock(jobLock(cfg, id), () => {
+    const job = runningJob(f.ledger, id);
+    if (!job || !stop(job)) throw Error(missing);
     recordEnd(cfg, job, { result: "stopped", outcome: "stopped", reason: "the coordinator redirected the work", reasonKind: "redirected" }, now);
   });
 }
@@ -126,33 +135,57 @@ export function stateOfPlay(path: string) {
 
 export type Options = { cfg?: Config; now?: number; live?: boolean; meters?: (cfg: Config, previous: Meter[], now: number) => Promise<Meter[]> };
 type MeterAlarm = { used: number; resetsAt: number | null; forecastAlarm: boolean; observedAt?: number };
+
+function readState(path: string) {
+  try { return readFileSync(path, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 export async function pass(o: Options = {}) {
-  const cfg = o.cfg ?? loadConfig(), f = files(cfg), now = o.now ?? Date.now(), live = o.live ?? false, time = clock(cfg.timezone);
-  mkdirSync(cfg.privateDir, { recursive: true });
+  const cfg = o.cfg ?? loadConfig(), f = files(cfg);
+  const release = tryLock(f.passLock);
+  if (!release) return;
+  try { return await passLocked(cfg, f, o); } finally { release(); }
+}
+
+async function passLocked(cfg: Config, f: ReturnType<typeof files>, o: Options) {
+  const now = o.now ?? Date.now(), live = o.live ?? false, time = clock(cfg.timezone);
+  const snapshot = readState(f.state);
   let previous: any = {};
-  try { previous = JSON.parse(readFileSync(f.state, "utf8")); } catch { /* first pass, or a torn file */ }
+  try { if (snapshot) previous = JSON.parse(snapshot); } catch { /* a torn file */ }
   const stored = readLines<Event>(f.events), seen = new Set(stored.map(e => e.key)), errors: string[] = [];
+  const newEvents: Event[] = [];
   const emit = (key: string, type: string, text: string, extra: Partial<Event> = {}) => {
     if (seen.has(key)) return;
-    const event: Event = { key, at: new Date(now).toISOString(), type, text, ...extra };
-    seen.add(key); appendLine(f.events, event);
+    seen.add(key);
+    newEvents.push({ key, at: new Date(now).toISOString(), type, text, ...extra });
   };
-  const emitAlarm = (key: string, type: string, text: string) => withLock(f.lock, () => {
-    if (!readLines<Event>(f.events).some(e => e.key === key)) emit(key, type, text);
-  });
+  // Called inside a write lock, since other commands can append while the watcher gathers data.
+  const flushEvents = () => {
+    if (!newEvents.length) return;
+    const keys = new Set(readLines<Event>(f.events).map(e => e.key));
+    for (const event of newEvents) if (!keys.has(event.key)) appendLine(f.events, event);
+    newEvents.length = 0;
+  };
 
   // 1. Jobs: finished, silent or over cap.
-  const running: (Job & { minutesSoFar: number })[] = [];
-  for (const candidate of jobs(f.ledger).filter(j => j.event === "started")) withLock(f.lock, () => {
-    const job = jobs(f.ledger).find(j => j.id === candidate.id);
-    if (job?.event !== "started") return;
+  const runningTokens = new Map<string, Tokens | null>();
+  for (const job of jobs(f.ledger).filter(j => j.event === "started")) {
     const provider = PROVIDERS[job.provider], started = Date.parse(job.started), facts = provider.facts(job.dir, started);
     const finishedAt = provider.finished(job.dir) ? statSync(join(job.dir, "result.txt")).mtimeMs : 0;
     const verdict = judge(job, { alive: alive(job), pidInUse: processStarted(job.pid) !== "", finishedAt, exit: harnessExit(job.dir), ...facts }, now, cfg.caps.silentMinutes);
-    if (!verdict) { running.push({ ...job, tokens: facts.tokens, minutesSoFar: minutesBetween(started, now) }); return; }
-    stop(job);
-    recordEnd(cfg, job, verdict, now);
-  });
+    runningTokens.set(job.id, facts.tokens);
+    if (!verdict) continue;
+    const release = tryLock(jobLock(cfg, job.id));
+    if (!release) continue;
+    try {
+      if (!runningJob(f.ledger, job.id)) continue;
+      stop(job);
+      recordEnd(cfg, job, verdict, now);
+    } finally { release(); }
+  }
 
   // 2. Meters, refreshed every 15 minutes; between refreshes the last reading stands.
   let meters: Meter[] = previous.meters ?? [], metersAt: number = previous.metersAt ?? 0;
@@ -174,18 +207,17 @@ export async function pass(o: Options = {}) {
   for (const m of meters) {
     if (m.used === null || m.reason) continue; // only a fresh real reading can raise an event
     const old = meterAlarms.get(m.id), observed = m.observedAt ?? m.checkedAt;
-    // Overlapping reads can have different timestamps but share the reading they crossed from.
     const crossing = old?.observedAt ?? old?.resetsAt ?? "initial";
     // A jump past several thresholds raises one usage alarm for the highest threshold crossed.
     const crossed = [1, 0.8, 0.5].find(t => (old?.used ?? 0) < t && m.used! >= t);
-    if (crossed) emitAlarm(`meter-crossing:${m.id}:${crossed}:after:${crossing}`, "meter", `${m.label} passed ${percent(crossed)}. ${meterLine(m, time.at)}.`);
+    if (crossed) emit(`meter-crossing:${m.id}:${crossed}:after:${crossing}`, "meter", `${m.label} passed ${percent(crossed)}. ${meterLine(m, time.at)}.`);
     const reset = old?.resetsAt != null && m.resetsAt != null && observed >= old.resetsAt
       && m.resetsAt > old.resetsAt && m.used < old.used;
     // Forecast changes alone never rearm this warning. A new window or recovery from the actual cap can.
     const recovered = (old?.used ?? 0) >= 1 && m.used < 1;
     let forecastAlarm = !!old?.forecastAlarm && !reset && !recovered;
     if (!forecastAlarm && m.verdict === "too fast") {
-      emitAlarm(`pace-crossing:${m.id}:after:${crossing}`, "too-fast", `${meterLine(m, time.at)}, before it resets ${time.at(m.resetsAt!)}.`);
+      emit(`pace-crossing:${m.id}:after:${crossing}`, "too-fast", `${meterLine(m, time.at)}, before it resets ${time.at(m.resetsAt!)}.`);
       forecastAlarm = true;
     }
     meterAlarms.set(m.id, { used: m.used, resetsAt: m.resetsAt, forecastAlarm, observedAt: observed });
@@ -201,6 +233,9 @@ export async function pass(o: Options = {}) {
 
   // 3. Today in the configured timezone: finished work, the usage split, tickets, idleness.
   const today = time.day(now), all = jobs(f.ledger), ended = all.filter(j => j.event === "ended" && time.day(Date.parse(j.ended!)) === today);
+  const running = all.filter(j => j.event === "started").map(j => ({
+    ...j, tokens: runningTokens.get(j.id) ?? j.tokens, minutesSoFar: Math.max(0, minutesBetween(Date.parse(j.started), now)),
+  }));
   const split: Record<string, number> = Object.fromEntries(KINDS.map(k => [k, 0]));
   for (const j of [...ended, ...running]) split[j.kind]! += j.tokens?.fresh ?? 0;
   let overhead: number = previous.split?.day === today ? previous.split.overhead : 0;
@@ -230,20 +265,34 @@ export async function pass(o: Options = {}) {
   });
 
   // 4. Review open asks and notify the coordinator: one batched message per 5 minutes.
-  const shipped = ended.filter(j => j.result === "finished"), play = stateOfPlay(f.stateOfPlay), ownerAsks = reviewAsks(cfg, now);
+  const shipped = ended.filter(j => j.result === "finished"), play = stateOfPlay(f.stateOfPlay);
+  const prepared = withLock(f.lock, () => {
+    if (readState(f.state) !== snapshot) return;
+    flushEvents();
+    const ownerAsks = reviewAsksLocked(cfg, now);
+    return { ownerAsks, pending: readLines<Event>(f.events) };
+  });
+  if (!prepared) return;
+  const { ownerAsks, pending } = prepared;
   // A lost state file must not replay old events: everything already stored counts as delivered.
   let cursor: Cursor = previous.notify ?? { delivered: stored.length, lastMailAt: 0 };
   const outbox: (Message & { at: string; outcome: string })[] = previous.outbox ?? [];
-  const pending = readLines<Event>(f.events), next = batch(pending, cursor, now);
+  const next = batch(pending, cursor, now);
   try {
     for (const message of next.messages) {
       const outcome = await send(cfg, message, live);
       outbox.push({ ...message, at: new Date(now).toISOString(), outcome });
-      if (outcome === "sent") recordWake(f.events, message.summary);
       if (outcome === "sent" || outcome === "written") for (const e of pending.slice(cursor.delivered, next.cursor.delivered)) {
         if (e.type === "owner-default") emit(`default-notified:${e.askId}`, "owner-default-notified",
           "The coordinator has been told the default is due.", { askId: e.askId, quiet: true });
       }
+      const recorded = withLock(f.lock, () => {
+        if (readState(f.state) !== snapshot) return false;
+        if (outcome === "sent") recordWake(f.events, message.summary);
+        flushEvents();
+        return true;
+      });
+      if (!recorded) return;
     }
     cursor = next.cursor;
   } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); } // nothing is marked delivered; the next pass tries again
@@ -265,6 +314,7 @@ export async function pass(o: Options = {}) {
   const defaultNotes = [...defaults.values()].map(e => `${time.at(Date.parse(e.at))} · ${e.text}`
     + (e.type === "owner-default" ? notified.has(e.askId) ? " · The coordinator has been told." : " · Coordinator notification pending." : ""));
   const state = {
+    passId: crypto.randomUUID(),
     at: now, timezone: cfg.timezone, sending: live ? "live" : "dry-run", notes: [...play.notes, ...defaultNotes], stateOfPlayAt: play.rewrittenAt, needsYou: play.needsYou,
     running: running.map(row), tickets: ticketRows, stages: STAGES, shippedToday: shipped.map(row), stoppedToday: ended.filter(j => j.result !== "finished").map(row),
     split: { day: today, ...split, overhead, total }, meters, metersAt, meterAlarms: Object.fromEntries(meterAlarms),
@@ -273,15 +323,20 @@ export async function pass(o: Options = {}) {
     ...health, fileWake: cfg.notify.coordinator.channel === "file",
     notify: cursor, outbox: outbox.slice(-10), errors,
   };
-  writeFileSync(f.state + ".tmp", JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
-  renameSync(f.state + ".tmp", f.state);
-  return state;
+  const serialized = JSON.stringify(state, null, 2) + "\n";
+  return withLock(f.lock, () => {
+    // Slow work used the old snapshot. A successor's state always wins.
+    if (readState(f.state) !== snapshot) return;
+    writeFileSync(f.state + ".tmp", serialized, { mode: 0o600 });
+    renameSync(f.state + ".tmp", f.state);
+    return state;
+  });
 }
-export type State = Awaited<ReturnType<typeof pass>>;
+export type State = NonNullable<Awaited<ReturnType<typeof passLocked>>>;
 
 if (import.meta.main) {
   const cfg = loadConfig(), live = cfg.notify.live && !process.argv.includes("--dry-run");
   const state = await pass({ cfg, live });
-  console.log(`${new Date(state.at).toISOString()} ${state.sending}: ${state.running.length} running, ${state.shippedToday.length} shipped today, ${state.errors.length} errors`);
+  if (state) console.log(`${new Date(state.at).toISOString()} ${state.sending}: ${state.running.length} running, ${state.shippedToday.length} shipped today, ${state.errors.length} errors`);
   process.exit(0);
 }
