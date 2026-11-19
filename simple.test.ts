@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { loadConfig } from "./config";
@@ -169,16 +169,16 @@ test("meter alarms rearm on usage recovery and ignore forecast swings", async ()
   const paths = files(cfg), previousState = readFileSync(paths.state, "utf8"), previousEvents = readFileSync(paths.events, "utf8");
   const abandoned = Bun.spawnSync([process.execPath, "--no-env-file", "-e",
     'import { tryLock } from "./lib"; if (!tryLock(process.argv[1]!)) process.exit(1);',
-    paths.lock], { cwd: import.meta.dir });
+    paths.passLock], { cwd: import.meta.dir });
   expect(abandoned.exitCode).toBe(0);
-  expect(existsSync(paths.lock)).toBe(true);
+  expect(existsSync(paths.passLock)).toBe(true);
 
   const meter = Promise.withResolvers<ReturnType<typeof reading>[]>();
   let readingMeter = false, newerReadMeter = false;
   const older = pass({ cfg, now, meters: () => { readingMeter = true; return meter.promise; } });
   try {
     expect(readingMeter).toBe(true); // The abandoned lock was recovered.
-    utimesSync(paths.lock, 0, 0);
+    utimesSync(paths.passLock, 0, 0);
     const newer = await pass({ cfg, now: now + 1, meters: async () => {
       newerReadMeter = true;
       return [reading("example", "Example meter", 0.8, start, reset, now + 1)];
@@ -199,6 +199,94 @@ test("meter alarms rearm on usage recovery and ignore forecast swings", async ()
   await check(1, 0.9);
   expect(alarms().slice(priorAlarms + 1).filter(e => e.type === "meter").map(e => e.text.split(". ")[0]))
     .toEqual(["Example meter passed 50%", "Example meter passed 80%", "Example meter passed 100%"]);
+});
+
+test("ticket, launch and wait commands complete while a meter read is pending", async () => {
+  const cfg = scratch(), root = cfg.privateDir, config = join(root, "reins.config.json");
+  const prompt = join(root, "prompt.txt"), harness = join(root, "fake-harness");
+  writeFileSync(config, JSON.stringify(cfg));
+  writeFileSync(prompt, "Made-up prompt");
+  writeFileSync(harness, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  const cli = (script: string, ...args: string[]) => {
+    const result = Bun.spawnSync([process.execPath, "--no-env-file", join(import.meta.dir, script), ...args], {
+      cwd: root, env: { ...process.env, REINS_CONFIG: config, REINS_FAKE_HARNESS: harness },
+      stdout: "pipe", stderr: "pipe", timeout: 6500,
+    });
+    expect(result.stderr.toString()).toBe("");
+    expect(result.exitCode).toBe(0);
+    return result.stdout.toString();
+  };
+  await send(cfg, { to: "coordinator", summary: "News ready to take", body: "" }, false);
+
+  const meter = Promise.withResolvers<ReturnType<typeof reading>[]>();
+  const entered = Promise.withResolvers<void>();
+  const watching = completedPass({ cfg, meters: () => { entered.resolve(); return meter.promise; } });
+  try {
+    await entered.promise;
+    cli("ticket.ts", "add", "--id", "example", "--title", "Check the lock", "--estimate", "15");
+    cli("run.ts", "--kind", "build", "--name", "Check the lock", "--cwd", root, "--prompt", prompt, "--ticket", "example");
+    expect(cli("wait.ts")).toContain("News ready to take");
+    expect(existsSync(files(cfg).state)).toBe(false);
+  } finally {
+    meter.resolve([]);
+    await watching;
+  }
+  const state = await watching;
+  expect(state.tickets).toMatchObject([{ id: "example", stage: "building", running: "Check the lock" }]);
+  expect(state.running).toMatchObject([{ ticket: "example" }]);
+}, 25000);
+
+test("a pass finishing after its successor preserves the newer state and alarms", async () => {
+  const cfg = scratch({ providers: {} }), f = files(cfg), now = Date.parse("2030-01-01T10:00:00Z");
+  const meter = Promise.withResolvers<ReturnType<typeof reading>[]>();
+  const entered = Promise.withResolvers<void>();
+  const older = pass({ cfg, now, meters: () => { entered.resolve(); return meter.promise; } });
+  try {
+    await entered.promise;
+    // Simulate displacement of the old lock so both passes can reach the publication check.
+    renameSync(f.passLock, f.passLock + ".displaced");
+    await completedPass({ cfg, now: now + 1, meters: async () =>
+      [reading("example", "Example meter", 0.8, null, now + 3600000, now + 1)] });
+    const newerState = readFileSync(f.state, "utf8"), newerEvents = readFileSync(f.events, "utf8");
+    meter.resolve([reading("example", "Example meter", 1, null, now + 3600000, now)]);
+    expect(await older).toBeUndefined();
+    expect(readFileSync(f.state, "utf8")).toBe(newerState);
+    expect(readFileSync(f.events, "utf8")).toBe(newerEvents);
+  } finally {
+    meter.resolve([]);
+    await older;
+  }
+});
+
+test("a lock can be recovered while its exited owner is still unreaped", async () => {
+  const cfg = scratch(), lock = files(cfg).passLock, pidFile = join(cfg.privateDir, "child-pid");
+  const parent = Bun.spawn(["python3", "-c", [
+    "import os, sys",
+    "pid = os.fork()",
+    "if pid == 0:",
+    "    os.execv(sys.argv[1], sys.argv[1:])",
+    "with open(sys.argv[-1], 'w') as f:",
+    "    f.write(str(pid))",
+    "sys.stdin.read()",
+    "os.waitpid(pid, 0)",
+  ].join("\n"), process.execPath, "--no-env-file", "-e",
+  'import { tryLock } from "./lib"; if (!tryLock(process.argv[1]!)) process.exit(1);',
+  lock, pidFile], { cwd: import.meta.dir, stdin: "pipe", stdout: "ignore", stderr: "inherit" });
+  try {
+    let state = "";
+    for (let i = 0; i < 100 && !state.startsWith("Z"); i++) {
+      await Bun.sleep(20);
+      if (!existsSync(pidFile)) continue;
+      const pid = readFileSync(pidFile, "utf8");
+      if (pid) state = Bun.spawnSync(["ps", "-p", pid, "-o", "stat="]).stdout.toString().trim();
+    }
+    expect(state).toMatch(/^Z/);
+    expect(existsSync(lock)).toBe(true);
+    expect(withLock(lock, () => "recovered", 200)).toBe("recovered");
+  } finally {
+    parent.stdin.end();
+    await parent.exited;
+  }
 });
 
 // Rule: the pace verdict is what warns the owner that a limit will run out early; its arithmetic must hold.

@@ -7,7 +7,7 @@ import { appendLine, files, readLines, withLock, type Ask, type Event } from "./
 export type Message = { to: "coordinator" | "owner"; summary: string; body: string };
 
 /** Deliver one message on a configured channel. Returns what happened, in a word or two; throws when it fails. */
-export async function send(cfg: Config, message: Message, live: boolean, { lockHeld = false } = {}): Promise<string> {
+export async function send(cfg: Config, message: Message, live: boolean): Promise<string> {
   const channel: Channel = cfg.notify[message.to];
   if (channel.channel === "none") return "no channel configured";
   const text = message.body ? `${message.summary}\n${message.body}` : message.summary;
@@ -15,12 +15,10 @@ export async function send(cfg: Config, message: Message, live: boolean, { lockH
   if (channel.channel === "file") {
     // The coordinator chat runs wait.ts in the background; it returns whatever has not been handed over yet.
     const f = files(cfg);
-    const writeWake = () => {
+    withLock(f.lock, () => {
       appendFileSync(f.wake, `--- ${new Date().toISOString()}\n${text}\n`, { mode: 0o600 });
       if (message.to === "coordinator") recordWake(f.events, message.summary);
-    };
-    if (lockHeld) writeWake();
-    else withLock(f.lock, writeWake);
+    });
     return "written";
   }
   if (channel.channel === "command") {

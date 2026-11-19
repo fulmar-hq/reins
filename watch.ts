@@ -66,25 +66,34 @@ export function stop(job: Job) {
 }
 
 type JobEnd = Pick<Job, "result" | "outcome" | "reason" | "reasonKind">;
+// A watcher and a manual redirect can both close a job. Only they need to wait for its process.
+const jobLock = (cfg: Config, id: string) => join(cfg.privateDir, `job-${encodeURIComponent(id)}.lock`);
+const runningJob = (ledger: string, id: string) => jobs(ledger).find(j => j.id === id && j.event === "started");
+
 function recordEnd(cfg: Config, job: Job, verdict: JobEnd, now: number) {
   const started = Date.parse(job.started);
   const tokens = PROVIDERS[job.provider].facts(job.dir, started).tokens;
   const achieved = verdict.outcome === "finished" ? achievedResult(job.dir) : null;
   const ended: Job = { ...job, event: "ended", ended: new Date(now).toISOString(), minutes: minutesBetween(started, now), tokens, ...verdict, achieved };
   const f = files(cfg);
-  appendLine(f.ledger, ended);
   const used = `${ended.minutes} min, ${count(tokens?.fresh)} tokens`;
   const summary = verdict.outcome === "failed" ? "Failed" : "Stopped";
   const text = verdict.outcome === "finished" ? `Finished: ${job.name} (${used}).` : `${summary}: ${job.name}, ${verdict.reason} (${used}).`;
-  appendLine(f.events, { key: `job:${job.id}`, at: ended.ended!, type: ended.result!, text, dir: job.dir,
-    ...(verdict.reasonKind === "redirected" ? { quiet: true } : {}) } satisfies Event);
+  withLock(f.lock, () => {
+    if (!runningJob(f.ledger, job.id)) return;
+    appendLine(f.ledger, ended);
+    appendLine(f.events, { key: `job:${job.id}`, at: ended.ended!, type: ended.result!, text, dir: job.dir,
+      ...(verdict.reasonKind === "redirected" ? { quiet: true } : {}) } satisfies Event);
+  });
 }
 
 export function stopRedirected(cfg: Config, id: string, now = Date.now()) {
   const f = files(cfg);
-  withLock(f.lock, () => {
-    const job = jobs(f.ledger).find(j => j.id === id);
-    if (!job || job.event !== "started" || !stop(job)) throw Error("There is no running job with that ID.");
+  const missing = "There is no running job with that ID.";
+  if (!runningJob(f.ledger, id)) throw Error(missing);
+  withLock(jobLock(cfg, id), () => {
+    const job = runningJob(f.ledger, id);
+    if (!job || !stop(job)) throw Error(missing);
     recordEnd(cfg, job, { result: "stopped", outcome: "stopped", reason: "the coordinator redirected the work", reasonKind: "redirected" }, now);
   });
 }
@@ -126,33 +135,56 @@ export function stateOfPlay(path: string) {
 
 export type Options = { cfg?: Config; now?: number; live?: boolean; meters?: (cfg: Config, previous: Meter[], now: number) => Promise<Meter[]> };
 type MeterAlarm = { used: number; resetsAt: number | null; forecastAlarm: boolean; observedAt?: number };
+
+function readState(path: string) {
+  try { return readFileSync(path, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 export async function pass(o: Options = {}) {
   const cfg = o.cfg ?? loadConfig(), f = files(cfg);
-  const release = tryLock(f.lock);
+  const release = tryLock(f.passLock);
   if (!release) return;
   try { return await passLocked(cfg, f, o); } finally { release(); }
 }
 
 async function passLocked(cfg: Config, f: ReturnType<typeof files>, o: Options) {
   const now = o.now ?? Date.now(), live = o.live ?? false, time = clock(cfg.timezone);
+  const snapshot = readState(f.state);
   let previous: any = {};
-  try { previous = JSON.parse(readFileSync(f.state, "utf8")); } catch { /* first pass, or a torn file */ }
+  try { if (snapshot) previous = JSON.parse(snapshot); } catch { /* a torn file */ }
   const stored = readLines<Event>(f.events), seen = new Set(stored.map(e => e.key)), errors: string[] = [];
+  const newEvents: Event[] = [];
   const emit = (key: string, type: string, text: string, extra: Partial<Event> = {}) => {
     if (seen.has(key)) return;
-    const event: Event = { key, at: new Date(now).toISOString(), type, text, ...extra };
-    seen.add(key); appendLine(f.events, event);
+    seen.add(key);
+    newEvents.push({ key, at: new Date(now).toISOString(), type, text, ...extra });
+  };
+  // Called inside a write lock, since other commands can append while the watcher gathers data.
+  const flushEvents = () => {
+    if (!newEvents.length) return;
+    const keys = new Set(readLines<Event>(f.events).map(e => e.key));
+    for (const event of newEvents) if (!keys.has(event.key)) appendLine(f.events, event);
+    newEvents.length = 0;
   };
 
   // 1. Jobs: finished, silent or over cap.
-  const running: (Job & { minutesSoFar: number })[] = [];
+  const runningTokens = new Map<string, Tokens | null>();
   for (const job of jobs(f.ledger).filter(j => j.event === "started")) {
     const provider = PROVIDERS[job.provider], started = Date.parse(job.started), facts = provider.facts(job.dir, started);
     const finishedAt = provider.finished(job.dir) ? statSync(join(job.dir, "result.txt")).mtimeMs : 0;
     const verdict = judge(job, { alive: alive(job), pidInUse: processStarted(job.pid) !== "", finishedAt, exit: harnessExit(job.dir), ...facts }, now, cfg.caps.silentMinutes);
-    if (!verdict) { running.push({ ...job, tokens: facts.tokens, minutesSoFar: minutesBetween(started, now) }); continue; }
-    stop(job);
-    recordEnd(cfg, job, verdict, now);
+    runningTokens.set(job.id, facts.tokens);
+    if (!verdict) continue;
+    const release = tryLock(jobLock(cfg, job.id));
+    if (!release) continue;
+    try {
+      if (!runningJob(f.ledger, job.id)) continue;
+      stop(job);
+      recordEnd(cfg, job, verdict, now);
+    } finally { release(); }
   }
 
   // 2. Meters, refreshed every 15 minutes; between refreshes the last reading stands.
@@ -201,6 +233,9 @@ async function passLocked(cfg: Config, f: ReturnType<typeof files>, o: Options) 
 
   // 3. Today in the configured timezone: finished work, the usage split, tickets, idleness.
   const today = time.day(now), all = jobs(f.ledger), ended = all.filter(j => j.event === "ended" && time.day(Date.parse(j.ended!)) === today);
+  const running = all.filter(j => j.event === "started").map(j => ({
+    ...j, tokens: runningTokens.get(j.id) ?? j.tokens, minutesSoFar: Math.max(0, minutesBetween(Date.parse(j.started), now)),
+  }));
   const split: Record<string, number> = Object.fromEntries(KINDS.map(k => [k, 0]));
   for (const j of [...ended, ...running]) split[j.kind]! += j.tokens?.fresh ?? 0;
   let overhead: number = previous.split?.day === today ? previous.split.overhead : 0;
@@ -230,20 +265,34 @@ async function passLocked(cfg: Config, f: ReturnType<typeof files>, o: Options) 
   });
 
   // 4. Review open asks and notify the coordinator: one batched message per 5 minutes.
-  const shipped = ended.filter(j => j.result === "finished"), play = stateOfPlay(f.stateOfPlay), ownerAsks = reviewAsksLocked(cfg, now);
+  const shipped = ended.filter(j => j.result === "finished"), play = stateOfPlay(f.stateOfPlay);
+  const prepared = withLock(f.lock, () => {
+    if (readState(f.state) !== snapshot) return;
+    flushEvents();
+    const ownerAsks = reviewAsksLocked(cfg, now);
+    return { ownerAsks, pending: readLines<Event>(f.events) };
+  });
+  if (!prepared) return;
+  const { ownerAsks, pending } = prepared;
   // A lost state file must not replay old events: everything already stored counts as delivered.
   let cursor: Cursor = previous.notify ?? { delivered: stored.length, lastMailAt: 0 };
   const outbox: (Message & { at: string; outcome: string })[] = previous.outbox ?? [];
-  const pending = readLines<Event>(f.events), next = batch(pending, cursor, now);
+  const next = batch(pending, cursor, now);
   try {
     for (const message of next.messages) {
-      const outcome = await send(cfg, message, live, { lockHeld: true });
+      const outcome = await send(cfg, message, live);
       outbox.push({ ...message, at: new Date(now).toISOString(), outcome });
-      if (outcome === "sent") recordWake(f.events, message.summary);
       if (outcome === "sent" || outcome === "written") for (const e of pending.slice(cursor.delivered, next.cursor.delivered)) {
         if (e.type === "owner-default") emit(`default-notified:${e.askId}`, "owner-default-notified",
           "The coordinator has been told the default is due.", { askId: e.askId, quiet: true });
       }
+      const recorded = withLock(f.lock, () => {
+        if (readState(f.state) !== snapshot) return false;
+        if (outcome === "sent") recordWake(f.events, message.summary);
+        flushEvents();
+        return true;
+      });
+      if (!recorded) return;
     }
     cursor = next.cursor;
   } catch (error) { errors.push(error instanceof Error ? error.message : String(error)); } // nothing is marked delivered; the next pass tries again
@@ -265,6 +314,7 @@ async function passLocked(cfg: Config, f: ReturnType<typeof files>, o: Options) 
   const defaultNotes = [...defaults.values()].map(e => `${time.at(Date.parse(e.at))} · ${e.text}`
     + (e.type === "owner-default" ? notified.has(e.askId) ? " · The coordinator has been told." : " · Coordinator notification pending." : ""));
   const state = {
+    passId: crypto.randomUUID(),
     at: now, timezone: cfg.timezone, sending: live ? "live" : "dry-run", notes: [...play.notes, ...defaultNotes], stateOfPlayAt: play.rewrittenAt, needsYou: play.needsYou,
     running: running.map(row), tickets: ticketRows, stages: STAGES, shippedToday: shipped.map(row), stoppedToday: ended.filter(j => j.result !== "finished").map(row),
     split: { day: today, ...split, overhead, total }, meters, metersAt, meterAlarms: Object.fromEntries(meterAlarms),
@@ -273,11 +323,16 @@ async function passLocked(cfg: Config, f: ReturnType<typeof files>, o: Options) 
     ...health, fileWake: cfg.notify.coordinator.channel === "file",
     notify: cursor, outbox: outbox.slice(-10), errors,
   };
-  writeFileSync(f.state + ".tmp", JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
-  renameSync(f.state + ".tmp", f.state);
-  return state;
+  const serialized = JSON.stringify(state, null, 2) + "\n";
+  return withLock(f.lock, () => {
+    // Slow work used the old snapshot. A successor's state always wins.
+    if (readState(f.state) !== snapshot) return;
+    writeFileSync(f.state + ".tmp", serialized, { mode: 0o600 });
+    renameSync(f.state + ".tmp", f.state);
+    return state;
+  });
 }
-export type State = Awaited<ReturnType<typeof passLocked>>;
+export type State = NonNullable<Awaited<ReturnType<typeof passLocked>>>;
 
 if (import.meta.main) {
   const cfg = loadConfig(), live = cfg.notify.live && !process.argv.includes("--dry-run");

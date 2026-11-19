@@ -30,6 +30,7 @@ export type Event = { key: string; at: string; type: string; text: string; dir?:
 export const files = (cfg: Config) => ({
   ledger: join(cfg.privateDir, "ledger.jsonl"), events: join(cfg.privateDir, "events.jsonl"), state: join(cfg.privateDir, "state.json"),
   stateOfPlay: join(cfg.privateDir, "state-of-play.md"), jobs: join(cfg.privateDir, "work/jobs"), lock: join(cfg.privateDir, "write.lock"),
+  passLock: join(cfg.privateDir, "watch.lock"),
   wake: cfg.notify.coordinator.channel === "file" && cfg.notify.coordinator.file || join(cfg.privateDir, "wake.txt"),
 });
 
@@ -82,18 +83,19 @@ export async function exec(argv: string[], options: { cwd?: string; timeoutMs?: 
   if (code !== 0) throw Error(`${argv[0]} exited ${code}`);
   return out;
 }
-type Row = { pid: number; pgid: number; started: string };
+type Row = { pid: number; pgid: number; stat: string; started: string };
 const processes = (): Row[] => Bun.spawnSync(["ps", "-A", "-o", "pid=,pgid=,stat=,lstart="]).stdout.toString().split("\n").flatMap(line => {
   const [pid, pgid, stat = "", ...started] = line.trim().split(/\s+/);
-  return pid && !stat.startsWith("Z") ? [{ pid: Number(pid), pgid: Number(pgid), started: started.join(" ") }] : []; // a finished, unreaped process is not alive
+  return pid ? [{ pid: Number(pid), pgid: Number(pgid), stat, started: started.join(" ") }] : [];
 });
+const liveProcess = (pid: number) => processes().find(p => p.pid === pid && !p.stat.startsWith("Z"));
 /** When the live process with this pid started, as `ps` prints it; "" when there is none. */
-export const processStarted = (pid: number) => processes().find(p => p.pid === pid)?.started ?? "";
+export const processStarted = (pid: number) => liveProcess(pid)?.started ?? "";
 /** True only when the recorded process itself is alive: same pid, same recorded start time, still leading its own group.
  *  This is the only condition under which a job may be signalled. Leftover children of a leader that has gone are never
  *  enough, because nothing then proves the group is still ours. */
 export function isOurLeader(pid: number, started: string): boolean {
-  const same = processes().find(p => p.pid === pid);
+  const same = liveProcess(pid);
   return Boolean(same) && started !== "" && same!.started === started && same!.pgid === pid;
 }
 let lockOwnerStarted: string | undefined;
@@ -108,9 +110,9 @@ function clearDeadLock(path: string) {
       const started = readFileSync(marker, "utf8");
       let dead = false;
       try { process.kill(pid, 0); } catch (error) { dead = (error as NodeJS.ErrnoException).code === "ESRCH"; }
-      if (!dead && started) {
-        const current = processStarted(pid);
-        dead = current !== "" && current !== started;
+      if (!dead) {
+        const current = processes().find(p => p.pid === pid);
+        dead = !!current && (current.stat.startsWith("Z") || !!started && current.started !== "" && current.started !== started);
       }
       if (!dead) return;
       // Only the contender that removes this owner's unique marker may clear its folder.
@@ -120,7 +122,7 @@ function clearDeadLock(path: string) {
   } catch { /* The folder changed while we inspected it, or could not be cleared. */ }
 }
 
-/** Try to take the shared write lock once, recovering a dead owner's lock along the way. */
+/** Try to take a lock once, recovering a dead owner's lock along the way. */
 export function tryLock(path: string): (() => void) | undefined {
   mkdirSync(dirname(path), { recursive: true });
   clearDeadLock(path);
@@ -138,7 +140,11 @@ export function tryLock(path: string): (() => void) | undefined {
     throw error;
   }
   return () => {
-    unlinkSync(join(path, owner));
+    try { unlinkSync(join(path, owner)); } catch (error) {
+      // Our marker can be gone if the lock folder was removed or moved.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
     try { rmdirSync(path); } catch (error) {
       // Another contender may already have replaced the now-empty folder.
       if (!["ENOENT", "EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
