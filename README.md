@@ -86,8 +86,9 @@ while a ticket is ready; a ticket is `building` or `in review` with no job for 3
 or 100 percent or turned "too fast"; a recorded sign-in ends within 3 hours; overhead passed 15 percent of the
 day's usage. A ticket also raises one alarm when it first becomes very over. Each is written to `events.jsonl`,
 and everything since the last wake goes out as one message, at most one every 5 minutes.
-Usage alarms can fire again after the reading falls below the threshold and crosses it again. A changing
-forecast alone does not rearm a pace warning.
+A reading that crosses several usage thresholds raises one alarm for the highest threshold crossed.
+Falling below a threshold rearms it, so falling below 50 percent rearms all three. A changing forecast
+alone does not rearm a pace warning.
 
 ## When it texts you
 

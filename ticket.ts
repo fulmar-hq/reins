@@ -66,14 +66,22 @@ function setTicket(cfg: Config, id: string, edits: Partial<Pick<Ticket, "title" 
   if (title !== undefined && !title.trim()) throw Error("Give a title in plain words.");
   withLock(files(cfg).lock, () => {
     const tickets = readTickets(cfg), ticket = ticketById(tickets, id);
-    const previousTitle = title !== undefined && title.trim() !== ticket.title ? ticket.title : undefined;
+    const previous = { ...ticket };
     if (title !== undefined) ticket.title = title.trim();
     if (estimate !== undefined) ticket.estimate = estimate;
     if (due === "none") delete ticket.due;
     else if (due !== undefined) ticket.due = due;
     if (waitingOn === "none") delete ticket.waitingOn;
     else if (waitingOn !== undefined) ticket.waitingOn = ticketById(tickets, waitingOn).id;
-    save(cfg, tickets, `updated details for "${ticket.title}"`, by, now, { ticket: id, previousTitle });
+    const changes: string[] = [];
+    const previousTitle = ticket.title !== previous.title ? previous.title : undefined;
+    if (previousTitle !== undefined) changes.push(`title "${ticket.title}"`);
+    if (ticket.estimate !== previous.estimate) changes.push(`estimate ${ticket.estimate} min`);
+    if (ticket.due !== previous.due) changes.push(ticket.due === undefined ? "due removed" : `due ${ticket.due}`);
+    if (ticket.waitingOn !== previous.waitingOn)
+      changes.push(ticket.waitingOn === undefined ? "waiting on removed" : `waiting on ${ticket.waitingOn}`);
+    const note = changes.length ? `updated "${previous.title}" (${changes.join("; ")})` : `made no changes to "${ticket.title}"`;
+    save(cfg, tickets, note, by, now, { ticket: id, previousTitle });
   });
 }
 export function moveTicket(cfg: Config, id: string, stage: Stage, by = "coordinator", now = Date.now(), proof?: string) {

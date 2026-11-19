@@ -142,11 +142,12 @@ test("meter alarms rearm on usage recovery and ignore forecast swings", async ()
   const cfg = scratch({ providers: {} }), start = Date.parse("2030-01-01T00:00:00Z");
   const gap = 15 * 60000, reset = start + 86400000;
   let now = start + 12 * 3600000;
+  const alarms = () => readLines<Event>(files(cfg).events).filter(e => e.type === "meter" || e.type === "too-fast");
   const check = async (used: number, forecast: number, unavailable = false) => {
     const sample = reading("example", "Example meter", used, start, reset + (now % (3 * gap)), now, null, forecast);
     await pass({ cfg, now, meters: async () => unavailable ? [] : [sample] });
     now += gap;
-    return readLines<Event>(files(cfg).events).filter(e => e.type === "meter" || e.type === "too-fast").map(e => e.type);
+    return alarms().map(e => e.type);
   };
   expect(await check(0.49, 0.9)).toEqual([]);
   expect(await check(0.5, 1.1)).toEqual(["meter", "too-fast"]);
@@ -156,6 +157,20 @@ test("meter alarms rearm on usage recovery and ignore forecast swings", async ()
   expect(await check(0.5, 1.3)).toEqual(["meter", "too-fast"]);
   await check(0.49, 0.9);
   expect(await check(0.51, 1.1)).toEqual(["meter", "too-fast", "meter"]);
+
+  await check(0.49, 0.9);
+  const priorAlarms = alarms().length;
+  await Promise.all([now, now + 1].map(at => pass({
+    cfg, now: at, meters: async () => [reading("example", "Example meter", 1, start, reset, at)],
+  })));
+  expect(alarms().slice(priorAlarms).map(e => e.text.split(". ")[0])).toEqual(["Example meter passed 100%"]);
+  now += gap + 1;
+  await check(0.49, 0.9);
+  await check(0.5, 0.9);
+  await check(0.8, 0.9);
+  await check(1, 0.9);
+  expect(alarms().slice(priorAlarms + 1).filter(e => e.type === "meter").map(e => e.text.split(". ")[0]))
+    .toEqual(["Example meter passed 50%", "Example meter passed 80%", "Example meter passed 100%"]);
 });
 
 // Rule: the pace verdict is what warns the owner that a limit will run out early; its arithmetic must hold.
@@ -271,12 +286,19 @@ test("setting an older ticket can add an estimate, set or clear a due date, and 
   expect(readTickets(cfg)[0]?.title).toBe("Sketch a map");
   expect(set("--estimate", "25", "--due", "2030-02-28", "--title", "Draw a map", "--waiting-on", "source")).toBe(0);
   expect(readTickets(cfg)[0]).toMatchObject({ title: "Draw a map", estimate: 25, due: "2030-02-28", waitingOn: "source" });
+  expect(readLines<Event>(events).at(-1)).toMatchObject({
+    ticket: "older", previousTitle: "Sketch a map", quiet: true,
+    text: 'coordinator updated "Sketch a map" (title "Draw a map"; estimate 25 min; due 2030-02-28; waiting on source)',
+  });
   const job = { ticket: "older", started: new Date(start).toISOString() } as Job;
   expect(ticketTimings(readTickets(cfg), [job], readLines<Event>(events), start + 20 * minute).get("older"))
     .toEqual({ elapsed: 10, predicted: 25, state: "on track" });
-  expect(set("--due", "none")).toBe(0);
+  expect(set("--estimate", "45", "--due", "none", "--title", " Draw a map ", "--waiting-on", "none")).toBe(0);
   expect(readTickets(cfg)[0]?.due).toBeUndefined();
-  expect(readTickets(cfg)[0]?.estimate).toBe(25);
+  expect(readTickets(cfg)[0]?.estimate).toBe(45);
+  expect(readTickets(cfg)[0]?.waitingOn).toBeUndefined();
+  expect(readLines<Event>(events).at(-1)?.text)
+    .toBe('coordinator updated "Draw a map" (estimate 45 min; due removed; waiting on removed)');
 });
 
 // Rule: stopping a job must never signal a process that is not provably that job.

@@ -125,7 +125,7 @@ export function stateOfPlay(path: string) {
 }
 
 export type Options = { cfg?: Config; now?: number; live?: boolean; meters?: (cfg: Config, previous: Meter[], now: number) => Promise<Meter[]> };
-type MeterAlarm = { used: number; resetsAt: number | null; forecastAlarm: boolean };
+type MeterAlarm = { used: number; resetsAt: number | null; forecastAlarm: boolean; observedAt?: number };
 export async function pass(o: Options = {}) {
   const cfg = o.cfg ?? loadConfig(), f = files(cfg), now = o.now ?? Date.now(), live = o.live ?? false, time = clock(cfg.timezone);
   mkdirSync(cfg.privateDir, { recursive: true });
@@ -137,6 +137,9 @@ export async function pass(o: Options = {}) {
     const event: Event = { key, at: new Date(now).toISOString(), type, text, ...extra };
     seen.add(key); appendLine(f.events, event);
   };
+  const emitAlarm = (key: string, type: string, text: string) => withLock(f.lock, () => {
+    if (!readLines<Event>(f.events).some(e => e.key === key)) emit(key, type, text);
+  });
 
   // 1. Jobs: finished, silent or over cap.
   const running: (Job & { minutesSoFar: number })[] = [];
@@ -159,26 +162,33 @@ export async function pass(o: Options = {}) {
   const backlog = await backlogRead;
   const meterAlarms = new Map(Object.entries<MeterAlarm>(previous.meterAlarms ?? {}));
   // Older snapshots already have the last usage reading and the old forecast event key.
-  if (!previous.meterAlarms) for (const old of (previous.meters ?? []) as Meter[]) {
-    if (old.used !== null) meterAlarms.set(old.id, {
+  for (const old of (previous.meters ?? []) as Meter[]) {
+    if (old.used === null) continue;
+    const alarm = meterAlarms.get(old.id);
+    if (!alarm) meterAlarms.set(old.id, {
       used: old.used, resetsAt: old.resetsAt, forecastAlarm: seen.has(`pace:${old.id}:${old.resetsAt}`),
+      observedAt: old.observedAt ?? old.checkedAt,
     });
+    else alarm.observedAt ??= old.observedAt ?? old.checkedAt;
   }
   for (const m of meters) {
     if (m.used === null || m.reason) continue; // only a fresh real reading can raise an event
     const old = meterAlarms.get(m.id), observed = m.observedAt ?? m.checkedAt;
+    // Overlapping reads can have different timestamps but share the reading they crossed from.
+    const crossing = old?.observedAt ?? old?.resetsAt ?? "initial";
+    // A jump past several thresholds raises one usage alarm for the highest threshold crossed.
     const crossed = [1, 0.8, 0.5].find(t => (old?.used ?? 0) < t && m.used! >= t);
-    if (crossed) emit(`meter-crossing:${m.id}:${crossed}:${observed}`, "meter", `${m.label} passed ${percent(crossed)}. ${meterLine(m, time.at)}.`);
+    if (crossed) emitAlarm(`meter-crossing:${m.id}:${crossed}:after:${crossing}`, "meter", `${m.label} passed ${percent(crossed)}. ${meterLine(m, time.at)}.`);
     const reset = old?.resetsAt != null && m.resetsAt != null && observed >= old.resetsAt
       && m.resetsAt > old.resetsAt && m.used < old.used;
     // Forecast changes alone never rearm this warning. A new window or recovery from the actual cap can.
     const recovered = (old?.used ?? 0) >= 1 && m.used < 1;
     let forecastAlarm = !!old?.forecastAlarm && !reset && !recovered;
     if (!forecastAlarm && m.verdict === "too fast") {
-      emit(`pace-crossing:${m.id}:${observed}`, "too-fast", `${meterLine(m, time.at)}, before it resets ${time.at(m.resetsAt!)}.`);
+      emitAlarm(`pace-crossing:${m.id}:after:${crossing}`, "too-fast", `${meterLine(m, time.at)}, before it resets ${time.at(m.resetsAt!)}.`);
       forecastAlarm = true;
     }
-    meterAlarms.set(m.id, { used: m.used, resetsAt: m.resetsAt, forecastAlarm });
+    meterAlarms.set(m.id, { used: m.used, resetsAt: m.resetsAt, forecastAlarm, observedAt: observed });
   }
   const expiries = cfg.expiries.map(e => {
     let made = NaN;
